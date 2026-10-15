@@ -4,7 +4,9 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  BarChart3,
   Boxes,
+  KeyRound,
   LayoutDashboard,
   ListOrdered,
   LogOut,
@@ -19,7 +21,9 @@ import { Button } from "@/components/ui/button";
 const NAV = [
   { href: "/", label: "仪表盘", icon: LayoutDashboard },
   { href: "/accounts", label: "账号管理", icon: Users },
+  { href: "/keys", label: "密钥分发", icon: KeyRound },
   { href: "/models", label: "模型中心", icon: Boxes },
+  { href: "/stats", label: "用量统计", icon: BarChart3 },
   { href: "/logs", label: "调用日志", icon: ListOrdered },
   { href: "/settings", label: "系统设置", icon: Settings },
 ];

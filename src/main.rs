@@ -8,6 +8,7 @@ mod error;
 mod gateway;
 mod logs;
 mod openai;
+mod router;
 mod routes;
 mod session;
 mod statics;
@@ -26,6 +27,7 @@ use crate::config::GatewayConfig;
 use crate::crypto::Encryptor;
 use crate::gateway::Gateway;
 use crate::logs::RequestLog;
+use crate::router::ModelRouter;
 use crate::store::JsonFileStore;
 use crate::upstream::{CodeArtsClient, CODEARTS_GATEWAY_PROD};
 
@@ -73,7 +75,8 @@ pub struct Cli {
     #[arg(long = "codearts-gateway", default_value = CODEARTS_GATEWAY_PROD)]
     pub codearts_gateway: String,
 
-    /// Gateway api key (admin + data plane)
+    /// Gateway api key (admin + data plane); acts as the master key when
+    /// keys.json is empty.
     #[arg(long = "gw-key", default_value = "")]
     pub gw_key: String,
 }
@@ -84,10 +87,12 @@ pub struct AppState {
     pub keys: Arc<KeyAuth>,
     pub pool: Arc<Pool>,
     pub store: Arc<JsonFileStore>,
+    pub key_store: Arc<JsonFileStore>,
     pub encryptor: Arc<Encryptor>,
     pub logs: Arc<RequestLog>,
     pub cfg: GatewayConfig,
     pub listen: String,
+    pub router: Arc<ModelRouter>,
 }
 
 #[tokio::main]
@@ -122,29 +127,59 @@ async fn main() -> anyhow::Result<()> {
         pool.add_data(acc);
     }
 
+    // API keys: load persisted keys; fall back to the master --gw-key so
+    // existing single-key deployments keep working without migration.
+    let persisted = store.load_keys().unwrap_or_default();
+    let keys = if persisted.is_empty() {
+        Arc::new(KeyAuth::new(vec![cli.gw_key.clone()]))
+    } else {
+        let ka = KeyAuth::from_entries(persisted);
+        // Ensure the master key still works even if not in the file.
+        if !ka.authenticate(&cli.gw_key) {
+            ka.upsert(crate::auth::ApiKey {
+                name: "master".to_string(),
+                key_hash: crate::auth::hash_key(&cli.gw_key),
+                hint: crate::auth::mask_key(&cli.gw_key),
+                created_at: Some(chrono::Utc::now()),
+                expires_at: None,
+                token_quota: 0,
+                tokens_used: 0,
+                model_allowlist: Vec::new(),
+                enabled: true,
+            });
+        }
+        Arc::new(ka)
+    };
+
+    let router = Arc::new(ModelRouter::new(
+        store.load_router().unwrap_or_default(),
+    ));
+
     let upstream = Arc::new(CodeArtsClient::new(
         cli.codearts_ak.clone(),
         cli.codearts_sk.clone(),
         cli.codearts_gateway.clone(),
     ));
 
-    let keys = Arc::new(KeyAuth::new(vec![cli.gw_key.clone()]));
     let gateway = Arc::new(Gateway::new(
         pool.clone(),
         upstream,
         keys.clone(),
         cfg.clone(),
+        router.clone(),
     ));
 
     let state = Arc::new(AppState {
         gateway,
         keys,
         pool,
-        store,
+        store: store.clone(),
+        key_store: store,
         encryptor,
         logs: Arc::new(RequestLog::new(500)),
         cfg,
         listen: cli.listen.clone(),
+        router,
     });
 
     let app = Router::new()

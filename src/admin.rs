@@ -11,7 +11,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::account::{Account, AccountData, AccountStatus};
+use crate::auth::{hash_key, mask_key, ApiKey};
 use crate::error::GatewayError;
+use crate::router::{DowngradeRule, RouteRule};
 use crate::AppState;
 
 /// Admin API router (all routes behind key auth).
@@ -21,7 +23,11 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/admin/api/accounts/{id}", patch(patch_account).delete(delete_account))
         .route("/admin/api/status", get(status))
         .route("/admin/api/logs", get(list_logs))
+        .route("/admin/api/stats", get(stats))
         .route("/admin/api/info", get(info))
+        .route("/admin/api/keys", get(list_keys).post(create_key))
+        .route("/admin/api/keys/{name}", patch(patch_key).delete(delete_key))
+        .route("/admin/api/router", get(get_router).put(put_router))
         .route("/admin/api/oauth/start", post(oauth_start))
         .route("/admin/api/oauth/callback", get(oauth_callback))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
@@ -177,6 +183,11 @@ async fn list_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(state.logs.list())
 }
 
+/// Usage statistics for the dashboard (totals, by-day, by-model, by-key).
+async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.logs.stats())
+}
+
 #[derive(Debug, Serialize)]
 struct InfoDto {
     version: String,
@@ -214,8 +225,164 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     })
 }
 
+// ---- Multi-key management ----
+
+#[derive(Debug, Serialize)]
+struct KeyDto {
+    name: String,
+    hint: String,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    token_quota: u64,
+    tokens_used: u64,
+    model_allowlist: Vec<String>,
+    enabled: bool,
+    expired: bool,
+}
+
+fn key_dto(k: &ApiKey) -> KeyDto {
+    KeyDto {
+        name: k.name.clone(),
+        hint: k.hint.clone(),
+        created_at: k.created_at,
+        expires_at: k.expires_at,
+        token_quota: k.token_quota,
+        tokens_used: k.tokens_used,
+        model_allowlist: k.model_allowlist.clone(),
+        enabled: k.enabled,
+        expired: k.is_expired(chrono::Utc::now()),
+    }
+}
+
+async fn list_keys(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut dtos: Vec<KeyDto> = state.keys.list().iter().map(key_dto).collect();
+    dtos.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(dtos)
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateKeyReq {
+    name: String,
+    key: String,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    token_quota: u64,
+    #[serde(default)]
+    model_allowlist: Vec<String>,
+}
+
+async fn create_key(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateKeyReq>,
+) -> Response {
+    if req.name.is_empty() || req.key.is_empty() {
+        return GatewayError::bad_request("name and key are required").into_response();
+    }
+    if state.keys.get_by_name(&req.name).is_some() {
+        return GatewayError::bad_request("key name already exists").into_response();
+    }
+    let entry = ApiKey {
+        name: req.name,
+        key_hash: hash_key(&req.key),
+        hint: mask_key(&req.key),
+        created_at: Some(chrono::Utc::now()),
+        expires_at: req.expires_at,
+        token_quota: req.token_quota,
+        tokens_used: 0,
+        model_allowlist: req.model_allowlist,
+        enabled: true,
+    };
+    let dto = key_dto(&entry);
+    state.keys.upsert(entry);
+    persist_keys(&state);
+    (StatusCode::CREATED, Json(dto)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchKeyReq {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    token_quota: Option<u64>,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn patch_key(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<PatchKeyReq>,
+) -> Response {
+    let Some(mut key) = state.keys.get_by_name(&name) else {
+        return GatewayError::bad_request("key not found").into_response();
+    };
+    if let Some(e) = req.enabled {
+        key.enabled = e;
+    }
+    if let Some(q) = req.token_quota {
+        key.token_quota = q;
+    }
+    if req.expires_at.is_some() {
+        key.expires_at = req.expires_at;
+    }
+    let dto = key_dto(&key);
+    state.keys.upsert(key);
+    persist_keys(&state);
+    Json(dto).into_response()
+}
+
+async fn delete_key(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    if !state.keys.remove_by_name(&name) {
+        return GatewayError::bad_request("key not found").into_response();
+    }
+    persist_keys(&state);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- Router rules management ----
+
+async fn get_router(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.router.config())
+}
+
+#[derive(Debug, Deserialize)]
+struct PutRouterReq {
+    #[serde(default)]
+    rules: Vec<RouteRule>,
+    #[serde(default)]
+    downgrade: Option<DowngradeRule>,
+}
+
+async fn put_router(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PutRouterReq>,
+) -> Response {
+    // Validate: alias and pattern are mutually exclusive per rule.
+    for r in &req.rules {
+        if !r.alias.is_empty() && !r.pattern.is_empty() {
+            return GatewayError::bad_request(
+                "alias and pattern are mutually exclusive in one rule",
+            )
+            .into_response();
+        }
+        if r.alias.is_empty() && r.pattern.is_empty() {
+            return GatewayError::bad_request("each rule needs an alias or a pattern")
+                .into_response();
+        }
+        if r.target.is_empty() {
+            return GatewayError::bad_request("each rule needs a target model").into_response();
+        }
+    }
+    state.router.replace(crate::router::RouterConfig {
+        rules: req.rules,
+        downgrade: req.downgrade,
+    });
+    persist_router(&state);
+    Json(state.router.config()).into_response()
+}
+
 async fn oauth_start() -> Response {
-    // OAuth is optional in the legacy gateway; it is not configured here.
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(serde_json::json!({"error": "oauth not configured"})),
@@ -231,11 +398,24 @@ async fn oauth_callback() -> Response {
         .into_response()
 }
 
-/// Persist the pool; failures are logged but do not fail the request
-/// (same behaviour as the legacy gateway's best-effort save).
+/// Persist the account pool; failures are logged but do not fail the request.
 fn persist(state: &Arc<AppState>) {
     if let Err(e) = state.store.save(&state.pool.list_data()) {
         tracing::error!("failed to persist accounts: {}", e);
+    }
+}
+
+/// Persist API keys to keys.json next to the account store.
+fn persist_keys(state: &Arc<AppState>) {
+    if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+        tracing::error!("failed to persist keys: {}", e);
+    }
+}
+
+/// Persist router config to router.json next to the account store.
+fn persist_router(state: &Arc<AppState>) {
+    if let Err(e) = state.key_store.save_router(&state.router.config()) {
+        tracing::error!("failed to persist router: {}", e);
     }
 }
 

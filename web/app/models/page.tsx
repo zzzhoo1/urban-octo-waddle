@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
-import { ArrowRight, Boxes, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowRight, Boxes, Plus, RefreshCw, Save, Sparkles, Trash2 } from "lucide-react";
 
-import { listModels, type ModelEntry } from "@/lib/api";
+import { api, listModels, type ModelEntry, type RouteRule, type RouterConfig } from "@/lib/api";
 import { Shell } from "@/components/shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,10 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 
 // Static tier map (mirrors the gateway's built-in alias table).
 const TIER_MAP: Record<string, { model: string; effort?: string; desc: string }> = {
@@ -27,16 +30,35 @@ const TIER_MAP: Record<string, { model: string; effort?: string; desc: string }>
   "deep-model": { model: "GLM-5.2", effort: "max", desc: "深度思考档位" },
 };
 
+interface EditableRule extends RouteRule {
+  _id: number;
+}
+
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rules, setRules] = useState<EditableRule[]>([]);
+  const [downgradeEnabled, setDowngradeEnabled] = useState(false);
+  const [downgradeSources, setDowngradeSources] = useState("");
+  const [downgradeTarget, setDowngradeTarget] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [nextId, setNextId] = useState(1);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setModels(await listModels());
+      const [m, rc] = await Promise.all([listModels(), api.getRouter()]);
+      setModels(m);
+      const editable = rc.rules.map((r, i) => ({ ...r, _id: i + 1 }));
+      setRules(editable);
+      setNextId(editable.length + 1);
+      if (rc.downgrade) {
+        setDowngradeEnabled(rc.downgrade.enabled);
+        setDowngradeSources(rc.downgrade.sources.join(", "));
+        setDowngradeTarget(rc.downgrade.target);
+      }
     } catch (e) {
-      toast.error(`加载模型列表失败：${e instanceof Error ? e.message : "未知错误"}`);
+      toast.error(`加载失败：${e instanceof Error ? e.message : "未知错误"}`);
     } finally {
       setLoading(false);
     }
@@ -52,46 +74,98 @@ export default function ModelsPage() {
     [models]
   );
 
+  const addRule = () => {
+    setRules([...rules, { _id: nextId, alias: "", pattern: "", target: "", effort: "", note: "" }]);
+    setNextId(nextId + 1);
+  };
+
+  const updateRule = (id: number, field: keyof RouteRule, value: string) => {
+    setRules(rules.map((r) => (r._id === id ? { ...r, [field]: value } : r)));
+  };
+
+  const removeRule = (id: number) => {
+    setRules(rules.filter((r) => r._id !== id));
+  };
+
+  const save = async () => {
+    // Validate: each rule needs alias XOR pattern, and a target.
+    for (const r of rules) {
+      const hasAlias = !!r.alias?.trim();
+      const hasPattern = !!r.pattern?.trim();
+      if (hasAlias === hasPattern) {
+        toast.error("每条规则必须且只能填『别名』或『正则』其中一项");
+        return;
+      }
+      if (!r.target.trim()) {
+        toast.error("每条规则必须填写目标模型");
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      const payload: RouterConfig = {
+        rules: rules.map((r) => ({
+          alias: r.alias?.trim() || undefined,
+          pattern: r.pattern?.trim() || undefined,
+          target: r.target.trim(),
+          effort: r.effort?.trim() || undefined,
+          note: r.note?.trim() || undefined,
+        })),
+        downgrade: downgradeEnabled
+          ? {
+              sources: downgradeSources
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean),
+              target: downgradeTarget.trim(),
+              enabled: true,
+            }
+          : null,
+      };
+      await api.putRouter(payload);
+      toast.success("路由规则已保存并即时生效");
+      await load();
+    } catch (err) {
+      toast.error(`保存失败：${err instanceof Error ? err.message : "未知错误"}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <Shell>
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold">模型中心</h1>
           <p className="text-sm text-[var(--muted-foreground)]">
-            档位别名由网关解析，上游模型清单每 10 分钟动态刷新
+            自定义规则优先于内置档位；保存后立即生效，无需重启
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load}>
-          <RefreshCw className="h-4 w-4" />
-          刷新
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={load}>
+            <RefreshCw className="h-4 w-4" />
+            刷新
+          </Button>
+          <Button size="sm" onClick={save} disabled={saving}>
+            <Save className="h-4 w-4" />
+            {saving ? "保存中..." : "保存规则"}
+          </Button>
+        </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
+      <div className="grid gap-4 lg:grid-cols-2 mb-6">
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-[var(--primary)]" />
-                档位别名（{tiers.length}）
+                内置档位（{tiers.length}）
               </CardTitle>
-              <CardDescription>客户端可直接使用，网关自动映射到实际模型</CardDescription>
+              <CardDescription>网关自带的别名，自定义规则可覆盖</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {loading ? (
-                <>
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                </>
-              ) : tiers.length === 0 ? (
-                <div className="py-8 text-center text-sm text-[var(--muted-foreground)]">
-                  未获取到档位列表
-                </div>
+                <Skeleton className="h-24 w-full" />
               ) : (
                 tiers.map((t) => {
                   const meta = TIER_MAP[t.id];
@@ -119,30 +193,18 @@ export default function ModelsPage() {
           </Card>
         </motion.div>
 
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.05, duration: 0.3 }}
-        >
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05, duration: 0.3 }}>
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Boxes className="h-4 w-4 text-[var(--primary)]" />
                 上游可用模型（{upstream.length}）
               </CardTitle>
-              <CardDescription>来自华为云 MaaS，按账号开通状态动态拉取</CardDescription>
+              <CardDescription>路由目标从这些模型中选择</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {loading ? (
-                <>
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                  <Skeleton className="h-12 w-full" />
-                </>
-              ) : upstream.length === 0 ? (
-                <div className="py-8 text-center text-sm text-[var(--muted-foreground)]">
-                  未获取到上游模型
-                </div>
+                <Skeleton className="h-24 w-full" />
               ) : (
                 upstream.map((m) => (
                   <div
@@ -158,6 +220,113 @@ export default function ModelsPage() {
           </Card>
         </motion.div>
       </div>
+
+      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1, duration: 0.3 }}>
+        <Card className="mb-6">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>自定义路由规则</CardTitle>
+                <CardDescription>
+                  别名精确匹配优先，其次正则匹配；客户端请求别名时自动路由到目标模型
+                </CardDescription>
+              </div>
+              <Button variant="outline" size="sm" onClick={addRule}>
+                <Plus className="h-4 w-4" />
+                添加规则
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {rules.length === 0 ? (
+              <div className="py-8 text-center text-sm text-[var(--muted-foreground)]">
+                暂无自定义规则，点击『添加规则』创建别名映射
+              </div>
+            ) : (
+              rules.map((r) => (
+                <div
+                  key={r._id}
+                  className="grid grid-cols-12 gap-2 items-center rounded-lg border border-[var(--border)] p-3"
+                >
+                  <div className="col-span-3">
+                    <Label className="text-xs">别名（精确匹配）</Label>
+                    <Input
+                      placeholder="my-model"
+                      value={r.alias ?? ""}
+                      onChange={(e) => updateRule(r._id, "alias", e.target.value)}
+                    />
+                  </div>
+                  <div className="col-span-3">
+                    <Label className="text-xs">正则（二选一）</Label>
+                    <Input
+                      placeholder="^gpt-.*"
+                      value={r.pattern ?? ""}
+                      onChange={(e) => updateRule(r._id, "pattern", e.target.value)}
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <Label className="text-xs">目标模型</Label>
+                    <Input
+                      placeholder="GLM-5.2"
+                      value={r.target}
+                      onChange={(e) => updateRule(r._id, "target", e.target.value)}
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <Label className="text-xs">思考档位（可选）</Label>
+                    <Input
+                      placeholder="high / max"
+                      value={r.effort ?? ""}
+                      onChange={(e) => updateRule(r._id, "effort", e.target.value)}
+                    />
+                  </div>
+                  <div className="col-span-2 flex items-end justify-end">
+                    <Button variant="ghost" size="icon" onClick={() => removeRule(r._id)}>
+                      <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </motion.div>
+
+      <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.15, duration: 0.3 }}>
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>后台任务自动降级</CardTitle>
+                <CardDescription>
+                  带 X-Background-Task 头的请求自动改用到便宜模型，为前台流量保留优质配额
+                </CardDescription>
+              </div>
+              <Switch checked={downgradeEnabled} onCheckedChange={setDowngradeEnabled} />
+            </div>
+          </CardHeader>
+          {downgradeEnabled && (
+            <CardContent className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>降级源模型（逗号分隔）</Label>
+                <Input
+                  placeholder="GLM-5.2, kimi-k2.6-vl"
+                  value={downgradeSources}
+                  onChange={(e) => setDowngradeSources(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>降级目标模型</Label>
+                <Input
+                  placeholder="openpangu-2.0-flash"
+                  value={downgradeTarget}
+                  onChange={(e) => setDowngradeTarget(e.target.value)}
+                />
+              </div>
+            </CardContent>
+          )}
+        </Card>
+      </motion.div>
     </Shell>
   );
 }

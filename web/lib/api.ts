@@ -26,6 +26,12 @@ export interface RequestLog {
   latency_ms: number;
   session_id?: string;
   account_id?: string;
+  ttft_ms?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  source_ip?: string;
+  key_name?: string;
 }
 
 export interface GatewayInfo {
@@ -49,6 +55,55 @@ export interface ModelEntry {
   id: string;
   object: string;
   owned_by: string;
+}
+
+export interface ApiKeyInfo {
+  name: string;
+  hint: string;
+  created_at?: string | null;
+  expires_at?: string | null;
+  token_quota: number;
+  tokens_used: number;
+  model_allowlist: string[];
+  enabled: boolean;
+  expired: boolean;
+}
+
+export interface StatsResponse {
+  totals: {
+    requests: number;
+    errors: number;
+    success_rate: number;
+    total_tokens: number;
+    avg_latency_ms: number;
+    avg_ttft_ms: number;
+  };
+  by_day: Array<{
+    date: string;
+    requests: number;
+    errors: number;
+    total_tokens: number;
+    avg_latency_ms: number;
+  }>;
+  by_model: Array<{ model: string; requests: number; total_tokens: number }>;
+  by_key: Array<{ key_name: string; requests: number; total_tokens: number }>;
+}
+
+export interface RouteRule {
+  alias?: string;
+  pattern?: string;
+  target: string;
+  effort?: string;
+  note?: string;
+}
+
+export interface RouterConfig {
+  rules: RouteRule[];
+  downgrade?: {
+    sources: string[];
+    target: string;
+    enabled: boolean;
+  } | null;
 }
 
 const BASE = "/admin/api";
@@ -109,13 +164,41 @@ export const api = {
     request<void>(`/accounts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   status: () => request<AccountStatus[]>("/status"),
   logs: () => request<RequestLog[]>("/logs"),
+  stats: () => request<StatsResponse>("/stats"),
   info: () => request<GatewayInfo>("/info"),
+  listKeys: () => request<ApiKeyInfo[]>("/keys"),
+  createKey: (payload: {
+    name: string;
+    key: string;
+    expires_at?: string | null;
+    token_quota?: number;
+    model_allowlist?: string[];
+  }) =>
+    request<ApiKeyInfo>("/keys", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  patchKey: (
+    name: string,
+    payload: { enabled?: boolean; token_quota?: number; expires_at?: string | null }
+  ) =>
+    request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteKey: (name: string) =>
+    request<void>(`/keys/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  getRouter: () => request<RouterConfig>("/router"),
+  putRouter: (cfg: RouterConfig) =>
+    request<RouterConfig>("/router", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
   oauthStart: () =>
     request<{ auth_url: string; state: string }>("/oauth/start", { method: "POST" }),
 };
 
-/// Data-plane call (used by the models page): goes through the gateway key
-/// stored in the gw_key cookie so it works with the same credential.
+/// Data-plane call: goes through the gateway key stored in the gw_key cookie.
 export async function listModels(): Promise<ModelEntry[]> {
   const key = getCookie("gw_key");
   const res = await fetch("/v1/models", {
