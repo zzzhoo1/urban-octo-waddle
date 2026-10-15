@@ -1,271 +1,55 @@
 # 后端实现提示词（AI 网关服务端 · 逆向提炼自 Antigravity-Manager 与 workbuddy-manager）
 
 > 使用方式：把本提示词整体喂给大模型，要求按规格生成完整后端实现。
-> 技术栈匹配：后端实现应自动匹配或建议现代化技术栈与框架，示例包含但不限于：
+> 强制要求：在开始实现前，必须先按如下规则自动选择最合适的后端技术栈，并输出结构化推荐结果，再进行后续实现。
+
+> 自动匹配技术栈规则（必须执行）：
+> - 先评估以下维度（0-10 分）：
+>   1) deployment_constraint（部署约束：静态二进制、musl、无外部运行时）
+>   2) latency_sensitivity（延迟敏感度）
+>   3) concurrency_need（并发/吞吐需求）
+>   4) dev_speed（开发速度）
+>   5) observability（可观测性与运维）
+>   6) team_familiarity（团队熟悉度）
+> - 默认权重：
+>   deployment_constraint 0.25
+>   latency_sensitivity 0.20
+>   concurrency_need 0.15
+>   dev_speed 0.15
+>   observability 0.10
+>   team_familiarity 0.15
+> - 候选栈基线：
+>   - Rust：部署/低延迟/高并发最强，开发速度较慢
+>   - Go：平衡性能与开发效率，部署和运维较友好
+>   - Node.js：开发速度和生态最强，适合快速迭代
+>   - Python(FastAPI)：开发速度强，适合 API 原型和中台快速落地
+> - 默认优先级：
+>   - 若需要单静态二进制 / 极低延迟 / 高并发：优先 Rust
+>   - 若要平衡性能与开发效率：优先 Go
+>   - 若重视开发速度与丰富生态：优先 Node.js 或 Python
+>   - 若两者接近：以 team_familiarity 为 tie-breaker
+> - 必须输出结构化推荐：
+>   {
+>     "primary": "Rust|Go|Node.js|Python",
+>     "secondary": "Rust|Go|Node.js|Python",
+>     "scores": { "Rust": 8.6, "Go": 8.2, "Node.js": 6.9, "Python": 6.7 },
+>     "rationale": "简要说明为什么选此栈",
+>     "compile_run_notes": "编译/运行/部署要点"
+>   }
+> - 在输出结构化推荐后，才开始按该栈实现系统。
+
+> 示例候选实现栈：
 > - Rust（axum + tokio + reqwest + serde）
 > - Go（Gin/Fiber + goroutines + net/http + encoding/json）
 > - Node.js（Fastify/Express + Node 18+ + undici / fetch）
 > - Python（FastAPI + asyncio + httpx）
 > 如需替换为其他语言或框架，仅替换对应框架名称，功能规格不变。
->
-> 技术栈自动匹配策略（可被生成器/实现器使用）：
-> - 目标维度：按部署目标、性能需求、二进制体积、开发速度、团队熟悉度与生态要求综合评分。
-> - 指标与权重（示例，生成器可按需求调整）：
->   - 部署约束（静态二进制、musl、容器体积优先）: 25%
->   - 延迟敏感度（P95 延迟目标）: 20%
->   - 吞吐与并发（并发连接/请求处理）: 15%
->   - 开发/交付速度（语言生态与第三方库）: 15%
->   - 可观测性与运维（Prometheus、日志、健康检查）: 10%
->   - 团队熟悉度（由用户输入偏好）: 15%
-> - 简单决策规则示例：
->   1. 若“部署约束”高（需要单静态二进制、无外部运行时），优先推荐 Rust 或 Go（Rust 更小体积与性能，Go 开发更快）。
->   2. 若“延迟敏感度”高且需极限性能/资源受限，优先推荐 Rust。
->   3. 若“开发速度”或“生态”权重高（快速原型、丰富中间件、动态扩展），优先推荐 Node.js 或 Python（FastAPI）。
->   4. 若团队熟悉度对某语言偏好高，则在分值接近时以团队熟悉度为决策杆。
->   5. 若需轻量运维与快速交付（容器化、K8s），Go/Node.js 通常是折中优选。
-> - 输出格式：生成器在选择栈时应返回 rationale（得分明细）与最终推荐（主/备），以及需要的框架/库清单与运行/编译建议。
->
-> 固定评分表与优先级表（建议写入生成器以降低随机性）：
-> - 输入：用户向生成器提供六项评分（每项 0-10）：deployment_constraint, latency_sensitivity, concurrency_need, dev_speed, observability, team_familiarity。
-> - 计算：最终得分 = sum(weight_i * normalized_input_i)，权重按上表。生成器应输出每个候选栈的得分并排序。
-> - 候选栈基线能力（示例评分 0-10）：
->   - Rust: deployment=9, latency=10, concurrency=9, dev_speed=4, observability=8, ecosystem=7
->   - Go: deployment=8, latency=8, concurrency=8, dev_speed=7, observability=8, ecosystem=7
->   - Node.js: deployment=4, latency=6, concurrency=7, dev_speed=9, observability=7, ecosystem=9
->   - Python(FastAPI): deployment=4, latency=5, concurrency=6, dev_speed=9, observability=7, ecosystem=8
-> - 决策阈值示例：
->   - 若最高得分 >= 8.0 → 强烈推荐（primary）。
->   - 若最高得分在 [6.0, 8.0) → 推荐（primary），并给出备选（secondary）。
->   - 若最高得分 < 6.0 → 推荐两种用于实验的栈（secondary 为可选生产候选）。
-> - 平局与靠近情况处理：若前两名分差 < 0.2，使用 team_familiarity 作为 tiebreaker；若仍然平局，输出两种主/备并标注“用户选择优先”。
->
-> 输出例子（生成器应返回 JSON 对象）：
-> {
->   "primary": "Rust",
->   "secondary": "Go",
->   "scores": {"Rust": 8.6, "Go": 8.2, "Node.js": 6.9, "Python": 6.7},
->   "rationale": "Rust 得分高因部署约束与延迟敏感度权重大，团队熟悉度适中。",
->   "compile_run_notes": "musl 编译、静态链接、交叉编译建议 (x86_64 -> ARM64)、建议使用 Tokio + axum + reqwest。"
-> }
->
-> 最终推荐写法：生成器必须同时输出（1）数值型得分，（2）选择理由短文，（3）主/备推荐与依赖列表，以及（4）编译/运行/部署要点。
->
-> 机器可读配置（JSON）：
-> ```json
-> {
->   "weights": {
->     "deployment_constraint": 0.25,
->     "latency_sensitivity": 0.20,
->     "concurrency_need": 0.15,
->     "dev_speed": 0.15,
->     "observability": 0.10,
->     "team_familiarity": 0.15
->   },
->   "candidates": {
->     "Rust": {
->       "deployment_constraint": 9,
->       "latency_sensitivity": 10,
->       "concurrency_need": 9,
->       "dev_speed": 4,
->       "observability": 8,
->       "team_familiarity": 7
->     },
->     "Go": {
->       "deployment_constraint": 8,
->       "latency_sensitivity": 8,
->       "concurrency_need": 8,
->       "dev_speed": 7,
->       "observability": 8,
->       "team_familiarity": 7
->     },
->     "Node.js": {
->       "deployment_constraint": 4,
->       "latency_sensitivity": 6,
->       "concurrency_need": 7,
->       "dev_speed": 9,
->       "observability": 7,
->       "team_familiarity": 9
->     },
->     "Python": {
->       "deployment_constraint": 4,
->       "latency_sensitivity": 5,
->       "concurrency_need": 6,
->       "dev_speed": 9,
->       "observability": 7,
->       "team_familiarity": 8
->     }
->   },
->   "thresholds": {
->     "strong": 8.0,
->     "recommended": 6.0,
->     "tie_gap": 0.2
->   }
-> }
-> ```
->
-> 机器可读配置（YAML）：
-> ```yaml
-> weights:
->   deployment_constraint: 0.25
->   latency_sensitivity: 0.20
->   concurrency_need: 0.15
->   dev_speed: 0.15
->   observability: 0.10
->   team_familiarity: 0.15
-> candidates:
->   Rust:
->     deployment_constraint: 9
->     latency_sensitivity: 10
->     concurrency_need: 9
->     dev_speed: 4
->     observability: 8
->     team_familiarity: 7
->   Go:
->     deployment_constraint: 8
->     latency_sensitivity: 8
->     concurrency_need: 8
->     dev_speed: 7
->     observability: 8
->     team_familiarity: 7
->   Node.js:
->     deployment_constraint: 4
->     latency_sensitivity: 6
->     concurrency_need: 7
->     dev_speed: 9
->     observability: 7
->     team_familiarity: 9
->   Python:
->     deployment_constraint: 4
->     latency_sensitivity: 5
->     concurrency_need: 6
->     dev_speed: 9
->     observability: 7
->     team_familiarity: 8
-> thresholds:
->   strong: 8.0
->   recommended: 6.0
->   tie_gap: 0.2
-> ```
->
-> Python 决策脚本（可直接执行）：
-> ```python
-> import json
-> from typing import Dict, List, Tuple
->
-> WEIGHTS = {
->     "deployment_constraint": 0.25,
->     "latency_sensitivity": 0.20,
->     "concurrency_need": 0.15,
->     "dev_speed": 0.15,
->     "observability": 0.10,
->     "team_familiarity": 0.15,
-> }
->
-> CANDIDATES = {
->     "Rust": {
->         "deployment_constraint": 9,
->         "latency_sensitivity": 10,
->         "concurrency_need": 9,
->         "dev_speed": 4,
->         "observability": 8,
->         "team_familiarity": 7,
->     },
->     "Go": {
->         "deployment_constraint": 8,
->         "latency_sensitivity": 8,
->         "concurrency_need": 8,
->         "dev_speed": 7,
->         "observability": 8,
->         "team_familiarity": 7,
->     },
->     "Node.js": {
->         "deployment_constraint": 4,
->         "latency_sensitivity": 6,
->         "concurrency_need": 7,
->         "dev_speed": 9,
->         "observability": 7,
->         "team_familiarity": 9,
->     },
->     "Python": {
->         "deployment_constraint": 4,
->         "latency_sensitivity": 5,
->         "concurrency_need": 6,
->         "dev_speed": 9,
->         "observability": 7,
->         "team_familiarity": 8,
->     },
-> }
->
->
-> def score_stack(input_scores: Dict[str, float], candidate: Dict[str, float]) -> float:
->     total = 0.0
->     for key, weight in WEIGHTS.items():
->         if key not in input_scores:
->             continue
->         # 0..10 -> 0..1 normalized value to preserve weighting semantics
->         normalized = input_scores[key] / 10.0
->         total += weight * (normalized * candidate[key] / 10.0)
->     return round(total * 10.0, 2)
->
->
-> def recommend(input_scores: Dict[str, float]) -> Dict:
->     scored = {
->         name: score_stack(input_scores, cfg)
->         for name, cfg in CANDIDATES.items()
->     }
->     ranked = sorted(scored.items(), key=lambda x: x[1], reverse=True)
->     primary, primary_score = ranked[0]
->     secondary, secondary_score = ranked[1]
->     tie_gap = 0.2
->     rationale = (
->         f"{primary} 在部署约束与性能需求上最优，综合评分 {primary_score}。"
->         f" {secondary} 作为备选，评分 {secondary_score}。"
->     )
->     if primary_score >= 8.0:
->         status = "strong"
->     elif primary_score >= 6.0:
->         status = "recommended"
->     else:
->         status = "experimental"
->     if primary_score - secondary_score < tie_gap:
->         rationale += " 前两名差距较小，建议根据团队熟悉度或用户偏好最终选型。"
->     return {
->         "status": status,
->         "primary": primary,
->         "secondary": secondary,
->         "scores": scored,
->         "rationale": rationale,
->         "compile_run_notes": (
->             "若部署需单静态二进制优先 Rust/Go；若交付速度优先选 Node.js 或 FastAPI；"
->             "如果处理 SSE/高并发流式场景，优先考虑 Rust 或 Go。"
->         ),
->     }
->
->
-> if __name__ == "__main__":
->     sample = {
->         "deployment_constraint": 9,
->         "latency_sensitivity": 8,
->         "concurrency_need": 8,
->         "dev_speed": 7,
->         "observability": 8,
->         "team_familiarity": 7,
->     }
->     print(json.dumps(recommend(sample), ensure_ascii=False, indent=2))
-> ```
->
-> 使用方式：
-> - 若需更贴近生产：把 `deployment_constraint` 和 `latency_sensitivity` 提升，Rust 更容易胜出。
-> - 若追求快速迭代：把 `dev_speed` 和 `team_familiarity` 提升，Node.js / Python 更可能成为主推荐。
-> - 若追求轻量化部署：优先模型输出 `Go` 或 `Rust`，并附带 `musl + static binary` 的编译建议。
->
-> 最终推荐写法：生成器必须同时输出（1）数值型得分，（2）选择理由短文，（3）主/备推荐与依赖列表，以及（4）编译/运行/部署要点。并在必要时附带选择依据与备选方案，用于评审和迭代。
 
 ---
 
 ## 角色
 
-你是一名资深后端架构师。请按照本规格实现一个生产可用的『AI 账号池代理网关』后端服务。该网关把多个上游 AI 账号（OAuth Token 或 AK/SK 凭据）包装[...] 
+你是一名资深后端架构师。请按照本规格实现一个生产可用的『AI 账号池代理网关』后端服务。该网关把多个上游 AI 账号（OAuth Token 或 AK/SK 凭据）包装成统一的 OpenAI 兼容接口，并在安全、鉴权、路由、熔断、账号管理、审计和定时任务等方面提供完整能力。
 
 ---
 
@@ -280,7 +64,7 @@
 | POST | /v1/messages | 【扩展】Anthropic Messages 协议适配，让 Claude Code CLI 可直连 |
 
 ### 1.2 请求处理流水线（严格按序）
-1. **鉴权**：从 `Authorization: Bearer <key>` �� `X-Api-Key` 提取密钥；密钥以 SHA-256 哈希落库，校验时比对哈希。每把密钥独立校验：启用状态、过期时间、Token 配额与 IP 约束；启动参数校验并写审计。
+1. **鉴权**：从 `Authorization: Bearer <key>` 或 `X-Api-Key` 提取密钥；密钥以 SHA-256 哈希落库，校验时比对哈希。每把密钥独立校验：启用状态、过期时间、Token 配额与 IP/版本限制。每次请求都应记录审计字段。
 2. **路由解析**：把客户端请求的模型名解析为实际上游模型：自定义别名（精确匹配优先）→ 正则规则 → 内置档位表 → 原样透传。命中后台任务标记后置兜底逻辑，并支持降级规则。
 3. **账号选择**：在健康账号子集内轮询（round-robin）。选择前先执行冷却恢复（冷却到期的账号自动恢复 active）。支持会话粘性：`X-Session-ID` 头或 body 中的 session_id，建立“模型/密钥/账号”绑定并超时清理。
 4. **熔断检查**：每账号一个三态熔断器（closed/open/half-open）。closed 连续失败达阈值（默认 20）切 open；open 冷却期（默认 30 秒）过后放行唯一探测请求；half-open 允许单次恢复探测并按结果恢复或重新打开。
@@ -307,7 +91,7 @@
 
 ---
 
-## 三、多密钥分发
+## ���、多密钥分发
 
 每把密钥独立字段：名称、SHA-256 哈希（明文仅创建时展示一次）、掩码提示（前4...后4）、创建时间、过期时间（可空=永不过期）、Token 配额（0=不限）、速率限制与版本限制。
 可选增强：IP 白名单（CIDR）、最大并发 IP 数、限定版本（国内版/国际版标签）。
@@ -337,7 +121,7 @@
 - 会话管理：聊天前持有 MaaS 会话（POST /v1/sessions，Agent-Type: PromptCenter），缓存复用 50 分钟，互斥保护；聊天请求携带 x-ot-session-id 与 user-session-id。
 - 模型清单：从统计接口动态拉取（enable=true 且 status=normal），10 分钟缓存，内置黑名单过滤实测不可用模型，失败回落静态兜底列表。
 - 档位别名：对外暴露 auto/fast/balanced/primary/deep 等档位名，网关侧解析为具体模型并注入默认思考档位（reasoning_effort），客户端显式指定时优先。
-- 工具调用：请求含 tools 时向 system 消息追加 XML 工具调用格式��示，保证下游客户端可解析。
+- 工具调用：请求含 tools 时向 system 消息追加 XML 工具调用格式提示，保证下游客户端可解析。
 
 ---
 
@@ -345,7 +129,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET/POST | /admin/api/accounts | 账号列表（凭据脱敏）/ 新建账号 |
+| GET/POST | /admin/api/accounts | 账号列表（凭据脱敏）/ 新建账��� |
 | PATCH/DELETE | /admin/api/accounts/{id} | 启停 / 删除账号 |
 | GET | /admin/api/status | 账号运行状态（健康、失败计数） |
 | GET | /admin/api/logs | 审计日志（新→旧） |
@@ -390,7 +174,7 @@
 
 ## 验收标准（实现完成后逐项自测）
 
-1. 携带有效密钥调用 /v1/chat/completions（流式与非流式）返回正常，错误密钥返回 401 标准错��信封。
+1. 携带有效密钥调用 /v1/chat/completions（流式与非流式）返回正常，错误密钥返回 401 标准错误信封。
 2. 创建别名规则后，用别名请求被正确路由到目标模型，/v1/models 同步出现别名。
 3. 新建密钥可独立设置配额，配额用尽后该密钥返回 429，其他密钥不受影响。
 4. 流式调用后审计日志包含首字延迟、token 用量；上游未返回扣费时该字段显示为『—』而非 0。
