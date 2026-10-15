@@ -69,15 +69,13 @@ jobs:
         if: matrix.cross == 'false'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Install aarch64 cross toolchain (musl.cc)
+      - name: Install aarch64 cross toolchain (Ubuntu repo)
         if: matrix.cross == 'true'
         run: |
-          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/cross.tgz
-          mkdir -p /opt/cross
-          tar -xzf /tmp/cross.tgz -C /opt/cross
-          echo "/opt/cross/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
       - name: Cache cargo
         uses: actions/cache@v4
