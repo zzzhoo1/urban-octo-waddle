@@ -1,13 +1,13 @@
 # 前端实现提示词（AI 网关管理面板 · 逆向提炼自 Antigravity-Manager 与 workbuddy-manager）
 
 > 使用方式：把本提示词整体喂给大模型，要求按规格生成完整前端实现。
-> 推荐技术栈：Next.js 15（App Router）· React 19 · TypeScript · shadcn/ui · Tailwind CSS v4 · motion · recharts · sonner。如需其他框架，仅替换对应库名，页面与交互规格不变。
+> 推荐技术栈：Next.js 15（App Router）· React 19 · TypeScript · shadcn/ui · Tailwind CSS v4 · motion · recharts · sonner。如需其他框架，仅替换对应库名，页面与交互��[...] 
 
 ---
 
 ## 角色
 
-你是一名资深前端工程师。请按照本规格实现一个『AI 账号池代理网关』的 Web 管理控制台。控制台通过管理面 API（/admin/api/*）与后端交互，提供账号、密钥、模型、用量、日志、任务、设置的完整可视化管理。所有 API 调用带 Bearer 密钥或 gw_key Cookie 鉴权；未授权（401）时跳转登录页。
+你是一名资深前端工程师。请按照本规格实现一个『AI 账号池代理网关』的 Web 管理控制台。控制台通过管理面 API（/admin/api/*）与后端交互，提供账号��[...] 
 
 ---
 
@@ -16,7 +16,7 @@
 ### 1.1 布局
 - 左侧固定导航栏（宽约 224px）：顶部产品标识（图标 + 名称），中部导航项（当前页高亮主色填充），底部退出登录按钮。
 - 主内容区自适应宽度，页面最大宽度与内边距统一。
-- 登录页为独立全屏居中卡片，不使用导航布局。
+- 登录页为独立全屏居中卡片，不���用导航布局。
 
 ### 1.2 交互规范（全站一致）
 - 所有操作结果用 toast 反馈（成功绿色、错误红色、警告黄色），危险操作（删除、禁用、清空）一律二次确认对话框。
@@ -39,7 +39,7 @@
 ## 二、登录页（/login）
 
 - 居中卡片：产品图标 + 标题 + 密码输入框（密钥）+ 登录按钮。
-- 提交时先用该密钥调用一个轻量管理接口验证（如 /admin/api/status）：401 提示『密钥无效』，成功则写入 Cookie（7 天有效期，path=/，SameSite=Lax）并跳转首页。
+- 提交时先用该密钥调用一个轻量管理接口验证（如 /admin/api/status）：401 提示『密钥无效』，成功则写入 Cookie（7 天有效期，path=/，SameSite=Lax）并跳转��[...] 
 - 网络异常与密钥错误分别给出不同提示文案。
 
 ---
@@ -78,14 +78,14 @@
 ## 五、密钥分发（/keys）
 
 ### 5.1 列表表格
-列：名称、密钥掩码（等宽字体）、状态徽章（生效中/已禁用/已过期/配额用尽）、用量/配额（含占比百分比）、模型白名单（空显示『全部模型』）、过期时间（空显示『永不过期』）、启用开关、删除按钮。
+列：名称、密钥掩码（等宽字体）、状态徽章（生效中/已禁用/已过期/配额用尽）、用量/配额（含占比百分比）、模型白名单（空显示『全部模型』）�[...] 
 
 ### 5.2 新建密钥对话框
-字段：名称、密钥内容（带『生成』按钮，crypto.getRandomValues 生成 sk- 前缀随机串）、过期时间（datetime-local，可选）、Token 配额（数字，0=不限）、模型白名单（逗号分隔，留空=全部）。
+字段：名称、密钥内容（带『生成』按钮，crypto.getRandomValues 生成 sk- 前缀随机串）、过期时间（datetime-local，可选）、Token 配额（数字，0=不限）、模型[...]
 醒目提示：『完整密钥仅在创建时可见一次，请立即复制保存』。
 
 ### 5.3 操作
-- 启停切换、删除二次确认（提示『使用该密钥的调用会立即被拒绝』）。
+- 启停切换、删除二次确认（提示『使用该密钥的调用会立即被拒绝'）。
 - 配额编辑（PATCH）：可直接修改配额与过期时间。
 
 ---
@@ -97,7 +97,7 @@
 - 上游可用模型列表：模型 ID + 来源徽章（owned_by），如实标注数据来源。
 
 ### 6.2 自定义路由规则编辑器（页面下方卡片）
-- 规则列表：每条规则一行——别名输入框（精确匹配）与正则输入框（二选一，互斥提示）、目标模型、思考档位（可选）、删除按钮；『添加规则』按钮追加空行。
+- 规则列表：每条规则一行——别名输入框（精确匹配）与正则输入框（二选一，互斥提示）、目标模型、思考档位（可选）、删除按钮；『添加规则』[...]
 - 校验：保存前检查每条规则『别名与正则必须且只能填一项』『目标模型必填』，不通过则 toast 指明。
 - 『保存规则』按钮提交全量配置，成功后 toast『路由规则已保存并即时生效』。
 
@@ -150,20 +150,20 @@
 ## 十、系统设置（/settings）
 
 ### 10.1 运行配置只读卡片
-以定义列表展示网关当前生效参数：版本（徽章）、监听地址、上游地址（等宽字体）、熔断阈值/冷却、失败阈值、冷却恢复时长、重试次数与退避、会话粘性 TTL 与容量、当前粘性会话数、API 密钥数。注明『配置为只读，修改需调整启动参数后重启』。
+以定义列表展示网关当前生效参数：版本（徽章）、监听地址、上游地址（等宽字体）、熔断阈值/冷却、失败阈值、冷却恢复时长、重试次数与退避、�[...] 
 
 ### 10.2 部署说明卡片
-编号列表说明升级流程（CI 构建 → 下载产物 → 校验 sha256 → 替换二进制 → 重启）；提示框说明前端已内嵌进二进制、无需 Node 环境、启动参数清单。
+编号列表说明升级流程（CI 构建 → 下载产物 → 校验 sha256 → 替换二进制 → 重启）；提示框说明前端已内嵌进二进制、无需 Node 环境、启动参数清单��[...] 
 
-### 10.3 高级设置（可选增强，参考 workbuddy）
+### 10.3 高级设置（可选增强，参考 workbuddy)
 - 定时任务开关与执行时刻编辑（输入即校验：时刻 0-23 去重排序、时长格式 30s/10m/2h）。
-- 只提交改动项，不全量覆盖；读取失败时锁定保存按钮并提示原因。
+- 只提交改动项，不全量覆盖；读取失败时锁定保存按钮并��示原因。
 
 ---
 
 ## 十一、组件清单（shadcn/ui 风格，自建基础组件）
 
-Button（default/destructive/outline/secondary/ghost/link 六种变体，sm/default/lg/icon 四种尺寸）、Card（Header/Title/Description/Content/Footer）、Badge（default/secondary/destructive/outline/success/warning）、Input、Label、Switch、Dialog（含 Overlay 遮罩与关闭按钮）、Table（Header/Body/Row/Head/Cell，行悬浮高亮）、Skeleton（脉冲动画）。所有组件支持 className 合并（clsx + tailwind-merge）。
+Button（default/destructive/outline/secondary/ghost/link 六种变体，sm/default/lg/icon 四种尺寸）、Card（Header/Title/Description/Content/Footer）、Badge（default/secondary/destructive/[...] 
 
 ---
 
@@ -201,3 +201,53 @@ GET    /v1/models               → {data:[{id,object,owned_by}]}（数据面，
 6. 统计页有调用后出现趋势图与分布图；时间范围切换正确过滤。
 7. 所有危险操作均有二次确认；所有操作均有 toast 反馈。
 8. 手机宽度下表格自动变为卡片布局，无横向撑破。
+
+---
+
+## 已应用现代化变更（2026-10-15）
+
+注：以下变更已在分支 `feature/modernize-prompt-and-scaffold` 中实现，用于保持提示词与仓库实现一致，便于后续将该提示词喂给大模型生成一致代码。
+
+变更概述
+- 引入并实现现代化响应式侧边栏（可访问、移动抽屉、折叠持久化、Tooltip）。
+- 增加语义化主题 token（surface / sidebar 等）并在 globals.css 中提供暗/亮配色。
+- 新增 Playwright E2E 测试覆盖侧边栏（桌面/移动行为）。
+- 优化图标导入为按需静态映射以减少运行时打包。
+
+已修改 / 新增的关键文件
+- components/Sidebar.tsx
+- components/icons.tsx
+- app/layout.tsx
+- app/globals.css (语义 token 与工具类)
+- package.json（增加 Playwright 脚本与依赖）
+- playwright.config.ts
+- tests/sidebar.spec.ts
+
+本地运行与测试（快速参考）
+1. 切换到实现分支：
+   - git fetch origin
+   - git checkout feature/modernize-prompt-and-scaffold
+2. 安装依赖：
+   - pnpm install
+3. 启动开发服务器（手动预览）：
+   - pnpm dev
+   - 访问 http://127.0.0.1:3000 并验证侧栏行为
+4. 运行 E2E（会在需要时启动 dev server）：
+   - pnpm test:e2e
+   - 可视化运行： pnpm test:e2e:headed
+
+新增/更新的验收项（补充原有验收标准）
+- 侧栏（桌面）支持 collapsed/expanded 两种状态，折叠偏好持久化（localStorage），折叠时显示 tooltip。
+- 侧栏（移动）以抽屉/Dialog 形式展示且可通过汉堡按钮打开/关闭。
+- Playwright E2E 覆盖：侧栏渲染、折叠/展开、移动抽屉打开、路由高亮、底部退出项可见。
+- 全局样式已新增语义 token（--surface / --sidebar 等），组件应使用这些 token 或对应的 Tailwind 工具类（.bg-surface/.bg-sidebar）以保证暗/亮主题一致。
+
+注意事项
+- 侧栏使用了 Radix Dialog/Tooltip、zustand（持久化）、lucide-react 图标；请确保在 package.json 中包含对应依赖并通过 pnpm/yarn/npm 安装。
+- globals.css 已定义语义 CSS 变量与一些 Tailwind 工具类，建议将这些 token 同步到 tailwind.config.ts 的 theme.extend 中以便完整整合（可以进一步自动化）。
+- Playwright webServer 配置假设 `pnpm dev` 在 127.0.0.1:3000 启动；若项目启动命令或端口不同，请调整 playwright.config.ts。
+
+下一步（可选）
+- 将此节追加到 docs/prompts/frontend-prompt.md（确认后我可直接提交）。
+- 将语义 token 映射入 tailwind.config.ts（我可以代为提交）。
+- 在 CI 中添加 Playwright workflow（我可以创建 GitHub Actions 流程）。
