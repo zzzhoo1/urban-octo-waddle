@@ -38,9 +38,19 @@ jobs:
           retention-days: 7
 
   backend:
-    name: Build gateway binary (x86_64-unknown-linux-musl)
+    name: Build gateway binary (${{ matrix.target_name }})
     runs-on: ubuntu-latest
     needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            target_name: linux-x86_64
+            cross: "false"
+          - target: aarch64-unknown-linux-musl
+            target_name: linux-aarch64
+            cross: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -53,10 +63,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
-      - name: Install musl tools
+      - name: Install musl tools (x86_64 native)
+        if: matrix.cross == 'false'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install aarch64 cross toolchain (musl.cc)
+        if: matrix.cross == 'true'
+        run: |
+          curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz -o /tmp/cross.tgz
+          mkdir -p /opt/cross
+          tar -xzf /tmp/cross.tgz -C /opt/cross
+          echo "/opt/cross/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc" >> $GITHUB_ENV
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -65,25 +86,25 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package artifact
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/gateway dist/codearts-gateway
+          cp target/${{ matrix.target }}/release/gateway dist/codearts-gateway
           chmod +x dist/codearts-gateway
           cd dist
           sha256sum codearts-gateway > codearts-gateway.sha256
-          tar -czf codearts-gateway-v2-linux-x86_64.tar.gz codearts-gateway codearts-gateway.sha256
+          tar -czf codearts-gateway-v2-${{ matrix.target_name }}.tar.gz codearts-gateway codearts-gateway.sha256
 
       - name: Upload backend artifact
         uses: actions/upload-artifact@v4
         with:
-          name: codearts-gateway-linux-x86_64
+          name: codearts-gateway-${{ matrix.target_name }}
           path: dist/
           retention-days: 30
 
@@ -95,17 +116,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download backend artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: codearts-gateway-linux-x86_64
           path: dist
+          pattern: codearts-gateway-*
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/codearts-gateway-v2-linux-x86_64.tar.gz
-            dist/codearts-gateway
+            dist/codearts-gateway-v2-linux-aarch64.tar.gz
             dist/codearts-gateway.sha256
           generate_release_notes: true
