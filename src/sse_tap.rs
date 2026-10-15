@@ -27,9 +27,11 @@ pub struct StreamAudit {
 }
 
 impl SseTap {
-    pub fn new() -> Self {
+    /// Create a tap whose clock starts at request initiation (not stream
+    /// consumption), so ttft covers upstream connect + first-byte latency.
+    pub fn new(started: Instant) -> Self {
         Self {
-            started: Instant::now(),
+            started,
             first_byte_ms: None,
             buffer: Vec::with_capacity(8192),
             final_usage: None,

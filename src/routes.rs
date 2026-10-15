@@ -186,7 +186,7 @@ async fn handle_chat(
                 // we collect ttft + final usage (tokens, credit, cache hits).
                 // When the stream ends (or the client disconnects), the tap
                 // is dropped and the audit entry is written from Drop.
-                let tap = std::sync::Arc::new(std::sync::Mutex::new(SseTap::new()));
+                let tap = std::sync::Arc::new(std::sync::Mutex::new(SseTap::new(started)));
                 let tap_for_items = tap.clone();
                 let audited = stream.map(move |item| {
                     match item {
