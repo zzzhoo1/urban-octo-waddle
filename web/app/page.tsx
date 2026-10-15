@@ -205,8 +205,9 @@ export default function DashboardPage() {
                     <XAxis dataKey="idx" tick={false} stroke="var(--muted-foreground)" />
                     <YAxis stroke="var(--muted-foreground)" fontSize={12} />
                     <Tooltip
-                      formatter={(value: number) => [`${value}ms`, "延迟"]}
-                      labelFormatter={(idx: number) => trendData[idx]?.time ?? ""}
+                      formatter={((value: unknown) => [`${value}ms`, "延迟"]) as never}
+                      labelFormatter={((idx: unknown) =>
+                        trendData[Number(idx)]?.time ?? "") as never}
                     />
                     <Area
                       type="monotone"
