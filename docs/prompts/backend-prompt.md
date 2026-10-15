@@ -23,7 +23,32 @@
 >   3. 若“开发速度”或“生态”权重高（快速原型、丰富中间件、动态扩展），优先推荐 Node.js 或 Python（FastAPI）。
 >   4. 若团队熟悉度对某语言偏好高，则在分值接近时以团队熟悉度为决策杆。
 >   5. 若需轻量运维与快速交付（容器化、K8s），Go/Node.js 通常是折中优选。
-> - 输出格式：生成器在选择栈时应返回 rationale（得分明细）与最终推荐（主/备），以及需要的框架/库清单与运行/编译建议。
+> - 输出格式：生成器在选择栈时应返回 rationale（得分明细）与最终推荐（主/备），以及需要的框架/库清单与运行/编译建议���
+>
+> 固定评分表与优先级表（建议写入生成器以降低随机性）：
+> - 输入：用户向生成器提供六项评分（每项 0-10）：deployment_constraint, latency_sensitivity, concurrency_need, dev_speed, observability, team_familiarity。
+> - 计算：最终得分 = sum(weight_i * normalized_input_i)，权重按上表。生成器应输出每个候选栈的得分并排序。
+> - 候选栈基线能力（示例评分 0-10）：
+>   - Rust: deployment=9, latency=10, concurrency=9, dev_speed=4, observability=8, ecosystem=7
+>   - Go: deployment=8, latency=8, concurrency=8, dev_speed=7, observability=8, ecosystem=7
+>   - Node.js: deployment=4, latency=6, concurrency=7, dev_speed=9, observability=7, ecosystem=9
+>   - Python(FastAPI): deployment=4, latency=5, concurrency=6, dev_speed=9, observability=7, ecosystem=8
+> - 决策阈值示例：
+>   - 若最高得分 >= 8.0 → 强烈推荐（primary）。
+>   - 若最高得分在 [6.0, 8.0) → 推荐（primary），并给出备选（secondary）。
+>   - 若最高得分 < 6.0 → 推荐两种用于实验的栈（secondary 为可选生产候选）。
+> - 平局与靠近情况处理：若前两名分差 < 0.2，使用 team_familiarity 作为 tiebreaker；若仍然平局，输出两种主/备并标注“用户选择优先”。
+>
+> 输出例子（生成器应返回 JSON 对象）：
+> {
+>   "primary": "Rust",
+>   "secondary": "Go",
+>   "scores": {"Rust": 8.6, "Go": 8.2, "Node.js": 6.9, "Python": 6.7},
+>   "rationale": "Rust 得分高因部署约束与延迟敏感度权重大，团队熟悉度适中。",
+>   "compile_run_notes": "musl 编译、静态链接、交叉编译建议 (x86_64 -> ARM64)、建议使用 Tokio + axum + reqwest。"
+> }
+>
+> 最终推荐写法：生成器必须同时输出（1）数值型得分，（2）选择理由短文，（3）主/备推荐与依赖列表，以及（4）编译/运行/部署要点。
 
 ---
 
@@ -67,7 +92,7 @@
 - 状态机：active 正常参与调度；disabled 不参与调度但签到/保活等任务照常；cooling 由失败阈值触发，冷却到期自动恢复。
 - 账号 CRUD 后原子化持久化（临时文件 + rename），文件权限 0600。
 - 支持扫码/OAuth 纳管入口（未配置时返回 501 而非报错）。
-- 【参考 workbuddy】账号分组（多账号池）：每组可绑定独立上游实例；密钥可绑定分组，请求只走该组账号池；未绑定分组只读不做账号管理。
+- 【参考 workbuddy】账号分组（多账号池）：每组可绑定独立���游实例；密钥可绑定分组，请求只走该组账号池；未绑定分组只读不做账号管理。
 
 ---
 
@@ -126,7 +151,7 @@
 
 ## 八、非功能要求
 
-1. **配置**：全部运行参数可经启动参数或配置文件注入（监听地址、加密密���、存储路径、上游 AK/SK、主密钥、熔断/重试/会话参数，默认值见规格[...]
+1. **配置**：全部运行参数可经启动参数或配置文件注入（监听地址、加密密���、存储路径、上游 AK/SK、主密钥、熔断/重试/会话参数，默认值见[...]
 2. **存储**：默认 JSON 文件（账号/密钥/路由），原子写入；可选 SQLite/PostgreSQL ���配层，接口抽象便于替换。
 3. **日志**：终端日志对 Authorization 头脱敏（Bearer ***）；结构化请求日志。
 4. **部署**：单静态二进制（musl 编译），前端静态产物内嵌，无外部运行时依赖；systemd 托管，Restart=on-failure。
@@ -156,7 +181,7 @@
 
 1. 携带有效密钥调用 /v1/chat/completions（流式与非流式）返回正常，错误密钥返回 401 标准错误信封。
 2. 创建别名规则后，用别名请求被正确路由到目标模型，/v1/models 同步出现别名。
-3. 新建密钥可独立设置配额，配额用尽后该密钥返回 429，其他密钥不受影响。
+3. 新建密钥可独立设置配额，配额用尽后��密钥返回 429，其他密钥不受影响。
 4. 流式调用后审计日志包含首字延迟、token 用量；上游未返回扣费时该字段显示为『—』而非 0。
 5. 账号连续失败触发冷却，冷却期后自动恢复；熔断器三态切换正确。
 6. 定时任务到点执行且幂等，结果留痕可查。
