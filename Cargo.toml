@@ -22,7 +22,7 @@ hex = "0.4"
 aes-gcm = "0.10"
 base64 = "0.22"
 rand = "0.8"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
