@@ -38,7 +38,7 @@ fn header_session_id(headers: &HeaderMap) -> String {
         .to_string()
 }
 
-fn source_ip(headers: &HeaderMap, addr: Option<&ConnectInfo<SocketAddr>>) -> String {
+fn source_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
     if let Some(xff) = headers.get("X-Forwarded-For") {
         if let Ok(v) = xff.to_str() {
             if let Some(first) = v.split(',').next() {
@@ -56,7 +56,7 @@ fn source_ip(headers: &HeaderMap, addr: Option<&ConnectInfo<SocketAddr>>) -> Str
             }
         }
     }
-    addr.map(|a| a.0.ip().to_string()).unwrap_or_default()
+    addr.ip().to_string()
 }
 
 /// Heuristic background-task detection: clients mark background work via
@@ -72,13 +72,13 @@ fn is_background_task(headers: &HeaderMap) -> bool {
 
 async fn handle_chat(
     State(state): State<Arc<AppState>>,
-    addr: Option<ConnectInfo<SocketAddr>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let started = Instant::now();
     let api_key = extract_api_key(&headers);
-    let src_ip = source_ip(&headers, addr.as_ref());
+    let src_ip = source_ip(&headers, &addr);
 
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
