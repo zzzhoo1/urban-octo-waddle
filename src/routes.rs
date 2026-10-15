@@ -62,20 +62,17 @@ fn source_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
 
 /// Writes the streaming audit entry exactly once when the response body
 /// is dropped (normal completion or client disconnect alike).
-struct StreamFinalize<F>
-where
-    F: for<'a> Fn(u16, Instant, u64, Option<&'a Usage>, Option<f64>, Option<u64>) -> RequestLogEntry,
-{
+struct StreamFinalize {
     tap: std::sync::Arc<std::sync::Mutex<SseTap>>,
     state: Arc<AppState>,
-    make_entry: F,
     key_hash: String,
+    model: String,
+    session_id: String,
+    source_ip: String,
+    key_name: String,
 }
 
-impl<F> Drop for StreamFinalize<F>
-where
-    F: for<'a> Fn(u16, Instant, u64, Option<&'a Usage>, Option<f64>, Option<u64>) -> RequestLogEntry,
-{
+impl Drop for StreamFinalize {
     fn drop(&mut self) {
         let audit = match self.tap.lock() {
             Ok(t) => t.clone_finish(),
@@ -84,21 +81,24 @@ where
         if audit.total_tokens > 0 {
             self.state.gateway.record_usage(&self.key_hash, audit.total_tokens);
         }
-        let usage_view = Usage {
+        self.state.logs.record(RequestLogEntry {
+            ts: Utc::now(),
+            method: "POST".to_string(),
+            path: "/v1/chat/completions".to_string(),
+            model: self.model.clone(),
+            status: 200,
+            latency_ms: audit.total_ms,
+            session_id: self.session_id.clone(),
+            account_id: String::new(),
+            ttft_ms: audit.ttft_ms,
             prompt_tokens: audit.prompt_tokens,
             completion_tokens: audit.completion_tokens,
             total_tokens: audit.total_tokens,
-            ..Default::default()
-        };
-        let entry = (self.make_entry)(
-            200,
-            Instant::now() - std::time::Duration::from_millis(audit.total_ms),
-            audit.ttft_ms,
-            Some(&usage_view),
-            audit.credit,
-            audit.cached_tokens,
-        );
-        self.state.logs.record(entry);
+            credit: audit.credit,
+            cached_tokens: audit.cached_tokens,
+            source_ip: self.source_ip.clone(),
+            key_name: self.key_name.clone(),
+        });
     }
 }
 
@@ -202,8 +202,11 @@ async fn handle_chat(
                 let finalize = StreamFinalize {
                     tap,
                     state: state.clone(),
-                    make_entry: log_entry,
                     key_hash: ctx.key_hash.clone(),
+                    model: client_model.clone(),
+                    session_id: session_id.clone(),
+                    source_ip: src_ip.clone(),
+                    key_name: ctx.key_name.clone(),
                 };
                 let body_stream = audited.chain(futures_util::stream::once(async move {
                     // Hold the finalizer until the stream completes; dropping
@@ -284,6 +287,8 @@ async fn handle_models(
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                credit: None,
+                cached_tokens: None,
                 source_ip: String::new(),
                 key_name: String::new(),
             });
