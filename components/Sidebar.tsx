@@ -3,13 +3,13 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
-import { Menu, LogOut } from "lucide-react";
+import { Menu } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import create from "zustand";
 import { persist } from "zustand/middleware";
 import clsx from "clsx";
+import { Icons, IconName } from "@/components/icons";
 
 // --- Sidebar state (persisted) ---
 type SidebarState = {
@@ -30,7 +30,7 @@ const useSidebarStore = create<SidebarState>()(
 );
 
 // --- Navigation definition ---
-const NAV = [
+const NAV: { href: string; label: string; icon: IconName }[] = [
   { href: "/", label: "仪表盘", icon: "PieChart" },
   { href: "/accounts", label: "账号管理", icon: "Users" },
   { href: "/keys", label: "密钥分发", icon: "Key" },
@@ -41,12 +41,9 @@ const NAV = [
   { href: "/settings", label: "系统设置", icon: "Settings" },
 ];
 
-// dynamic icon loader (lucide-react)
-function Icon({ name, className }: { name: string; className?: string }) {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const Icons: any = require("lucide-react");
-  const Comp = Icons[name] ?? Icons["Circle"];
-  return <Comp className={clsx("w-5 h-5", className)} aria-hidden />;
+function Icon({ name, className = "w-5 h-5" }: { name: IconName; className?: string }) {
+  const Comp = Icons[name] ?? Icons.PieChart;
+  return <Comp className={clsx(className)} aria-hidden />;
 }
 
 export default function Sidebar() {
@@ -89,7 +86,7 @@ export default function Sidebar() {
                     <div className="font-semibold">AI 网关</div>
                     <Dialog.Close asChild>
                       <button className="p-1 rounded hover:bg-accent">
-                        <LogOut className="w-4 h-4" />
+                        <Icons.LogOut className="w-4 h-4" />
                       </button>
                     </Dialog.Close>
                   </div>
@@ -135,7 +132,7 @@ export default function Sidebar() {
           collapsed ? "w-16" : "w-56",
           "transition-all duration-200"
         )}
-        aria-label="主导航"
+        aria-label="主��航"
       >
         <div className="flex flex-col h-full">
           {/* header */}
@@ -200,7 +197,7 @@ export default function Sidebar() {
           {/* footer */}
           <div className="px-3 py-3">
             <button className="flex items-center gap-2 w-full rounded-md px-2 py-2 text-sm hover:bg-accent">
-              <LogOut className="w-4 h-4" />
+              <Icons.LogOut className="w-4 h-4" />
               {!collapsed && <span>退出登录</span>}
             </button>
           </div>
