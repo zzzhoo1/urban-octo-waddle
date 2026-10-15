@@ -11,6 +11,7 @@ mod openai;
 mod router;
 mod routes;
 mod session;
+mod sse_tap;
 mod statics;
 mod store;
 mod upstream;

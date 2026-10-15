@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -16,7 +16,8 @@ use std::net::SocketAddr;
 use crate::auth::extract_api_key;
 use crate::error::GatewayError;
 use crate::logs::RequestLogEntry;
-use crate::openai::{ChatCompletionRequest, EmbeddingRequest};
+use crate::openai::{ChatCompletionRequest, EmbeddingRequest, Usage};
+use crate::sse_tap::SseTap;
 use crate::AppState;
 
 const MAX_REQUEST_BYTES: usize = 8 << 20; // 8 MiB
@@ -57,6 +58,48 @@ fn source_ip(headers: &HeaderMap, addr: &SocketAddr) -> String {
         }
     }
     addr.ip().to_string()
+}
+
+/// Writes the streaming audit entry exactly once when the response body
+/// is dropped (normal completion or client disconnect alike).
+struct StreamFinalize<F>
+where
+    F: for<'a> Fn(u16, Instant, u64, Option<&'a Usage>, Option<f64>, Option<u64>) -> RequestLogEntry,
+{
+    tap: std::sync::Arc<std::sync::Mutex<SseTap>>,
+    state: Arc<AppState>,
+    make_entry: F,
+    key_hash: String,
+}
+
+impl<F> Drop for StreamFinalize<F>
+where
+    F: for<'a> Fn(u16, Instant, u64, Option<&'a Usage>, Option<f64>, Option<u64>) -> RequestLogEntry,
+{
+    fn drop(&mut self) {
+        let audit = match self.tap.lock() {
+            Ok(t) => t.clone_finish(),
+            Err(_) => return,
+        };
+        if audit.total_tokens > 0 {
+            self.state.gateway.record_usage(&self.key_hash, audit.total_tokens);
+        }
+        let usage_view = Usage {
+            prompt_tokens: audit.prompt_tokens,
+            completion_tokens: audit.completion_tokens,
+            total_tokens: audit.total_tokens,
+            ..Default::default()
+        };
+        let entry = (self.make_entry)(
+            200,
+            Instant::now() - std::time::Duration::from_millis(audit.total_ms),
+            audit.ttft_ms,
+            Some(&usage_view),
+            audit.credit,
+            audit.cached_tokens,
+        );
+        self.state.logs.record(entry);
+    }
 }
 
 /// Heuristic background-task detection: clients mark background work via
@@ -108,7 +151,12 @@ async fn handle_chat(
         upstream_req.reasoning_effort = ctx.resolved.effort.clone();
     }
 
-    let log_entry = |status: u16, started: Instant, ttft: u64, usage: Option<&crate::openai::Usage>| RequestLogEntry {
+    let log_entry = |status: u16,
+                     started: Instant,
+                     ttft: u64,
+                     usage: Option<&Usage>,
+                     credit: Option<f64>,
+                     cached: Option<u64>| RequestLogEntry {
         ts: Utc::now(),
         method: "POST".to_string(),
         path: "/v1/chat/completions".to_string(),
@@ -121,6 +169,8 @@ async fn handle_chat(
         prompt_tokens: usage.map(|u| u.prompt_tokens).unwrap_or(0),
         completion_tokens: usage.map(|u| u.completion_tokens).unwrap_or(0),
         total_tokens: usage.map(|u| u.total_tokens).unwrap_or(0),
+        credit,
+        cached_tokens: cached,
         source_ip: src_ip.clone(),
         key_name: ctx.key_name.clone(),
     };
@@ -132,22 +182,50 @@ async fn handle_chat(
             .await
         {
             Ok(stream) => {
-                state.logs.record(log_entry(200, started, 0, None));
-                let byte_stream = stream.map(|chunk| {
-                    chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                // Side-channel tap: bytes flow downstream untouched while
+                // we collect ttft + final usage (tokens, credit, cache hits).
+                // When the stream ends (or the client disconnects), the tap
+                // is dropped and the audit entry is written from Drop.
+                let tap = std::sync::Arc::new(std::sync::Mutex::new(SseTap::new()));
+                let tap_for_items = tap.clone();
+                let audited = stream.map(move |item| {
+                    match item {
+                        Ok(bytes) => {
+                            if let Ok(mut t) = tap_for_items.lock() {
+                                t.observe(&bytes);
+                            }
+                            Ok::<_, std::io::Error>(bytes)
+                        }
+                        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                    }
                 });
+                let finalize = StreamFinalize {
+                    tap,
+                    state: state.clone(),
+                    make_entry: log_entry,
+                    key_hash: ctx.key_hash.clone(),
+                };
+                let body_stream = audited.chain(futures_util::stream::once(async move {
+                    // Hold the finalizer until the stream completes; dropping
+                    // it here writes the audit entry exactly once.
+                    drop(finalize);
+                    Err::<Bytes, std::io::Error>(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "__end__",
+                    ))
+                }).filter_map(|_| async { None::<Result<Bytes, std::io::Error>> }));
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "text/event-stream")
                     .header("Cache-Control", "no-cache")
-                    .body(Body::from_stream(byte_stream))
+                    .body(Body::from_stream(body_stream))
                     .unwrap_or_else(|_| {
                         GatewayError::internal("failed to build stream response").into_response()
                     })
             }
             Err(e) => {
                 let status = e.kind.status().as_u16();
-                state.logs.record(log_entry(status, started, 0, None));
+                state.logs.record(log_entry(status, started, 0, None, None, None));
                 e.into_response()
             }
         }
@@ -157,12 +235,18 @@ async fn handle_chat(
                 if let Some(u) = &resp.usage {
                     state.gateway.record_usage(&ctx.key_hash, u.total_tokens);
                 }
-                state.logs.record(log_entry(200, started, 0, resp.usage.as_ref()));
+                let credit = resp.usage.as_ref().and_then(|u| u.credit);
+                let cached = resp.usage.as_ref().and_then(|u| u.cached_tokens());
+                state
+                    .logs
+                    .record(log_entry(200, started, 0, resp.usage.as_ref(), credit, cached));
                 Json(resp).into_response()
             }
             Err(e) => {
                 let status = e.kind.status().as_u16();
-                state.logs.record(log_entry(status, started, 0, None));
+                state
+                    .logs
+                    .record(log_entry(status, started, 0, None, None, None));
                 e.into_response()
             }
         }

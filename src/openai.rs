@@ -93,6 +93,13 @@ impl ChatCompletionRequest {
     }
 }
 
+/// Nested cache detail reported by some providers (OpenAI style).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PromptTokensDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Usage {
     #[serde(default)]
@@ -101,6 +108,27 @@ pub struct Usage {
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// Actual credit deducted by the upstream. None = unknown; the panel
+    /// shows "—" in that case, which is deliberately distinct from 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<f64>,
+    /// Flat cache-hit counter used by some providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u64>,
+    /// OpenAI-style nested cache detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+impl Usage {
+    /// Cached tokens from any of the known response shapes.
+    pub fn cached_tokens(&self) -> Option<u64> {
+        self.prompt_cache_hit_tokens.or_else(|| {
+            self.prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

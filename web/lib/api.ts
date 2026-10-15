@@ -30,6 +30,8 @@ export interface RequestLog {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  credit?: number;
+  cached_tokens?: number;
   source_ip?: string;
   key_name?: string;
 }

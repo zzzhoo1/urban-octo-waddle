@@ -26,6 +26,14 @@ pub struct RequestLogEntry {
     pub completion_tokens: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub total_tokens: u64,
+    /// Actual credit deducted (from upstream usage.credit). None = the
+    /// upstream did not report it; the panel renders "—", never 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<f64>,
+    /// Prompt tokens served from cache. None = upstream did not report it;
+    /// the panel renders "—", distinct from an actual 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
     /// Client source IP (from connection or X-Forwarded-For).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_ip: String,
