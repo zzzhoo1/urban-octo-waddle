@@ -23,7 +23,7 @@
 >   3. 若“开发速度”或“生态”权重高（快速原型、丰富中间件、动态扩展），优先推荐 Node.js 或 Python（FastAPI）。
 >   4. 若团队熟悉度对某语言偏好高，则在分值接近时以团队熟悉度为决策杆。
 >   5. 若需轻量运维与快速交付（容器化、K8s），Go/Node.js 通常是折中优选。
-> - 输出格式：生成器在选择栈时应返回 rationale（得分明细）与最终推荐（主/备），以及需要的框架/库清单与运行/编译建议���
+> - 输出格式：生成器在选择栈时应返回 rationale（得分明细）与最终推荐（主/备），以及需要的框架/库清单与运行/编译建议。
 >
 > 固定评分表与优先级表（建议写入生成器以降低随机性）：
 > - 输入：用户向生成器提供六项评分（每项 0-10）：deployment_constraint, latency_sensitivity, concurrency_need, dev_speed, observability, team_familiarity。
@@ -49,12 +49,223 @@
 > }
 >
 > 最终推荐写法：生成器必须同时输出（1）数值型得分，（2）选择理由短文，（3）主/备推荐与依赖列表，以及（4）编译/运行/部署要点。
+>
+> 机器可读配置（JSON）：
+> ```json
+> {
+>   "weights": {
+>     "deployment_constraint": 0.25,
+>     "latency_sensitivity": 0.20,
+>     "concurrency_need": 0.15,
+>     "dev_speed": 0.15,
+>     "observability": 0.10,
+>     "team_familiarity": 0.15
+>   },
+>   "candidates": {
+>     "Rust": {
+>       "deployment_constraint": 9,
+>       "latency_sensitivity": 10,
+>       "concurrency_need": 9,
+>       "dev_speed": 4,
+>       "observability": 8,
+>       "team_familiarity": 7
+>     },
+>     "Go": {
+>       "deployment_constraint": 8,
+>       "latency_sensitivity": 8,
+>       "concurrency_need": 8,
+>       "dev_speed": 7,
+>       "observability": 8,
+>       "team_familiarity": 7
+>     },
+>     "Node.js": {
+>       "deployment_constraint": 4,
+>       "latency_sensitivity": 6,
+>       "concurrency_need": 7,
+>       "dev_speed": 9,
+>       "observability": 7,
+>       "team_familiarity": 9
+>     },
+>     "Python": {
+>       "deployment_constraint": 4,
+>       "latency_sensitivity": 5,
+>       "concurrency_need": 6,
+>       "dev_speed": 9,
+>       "observability": 7,
+>       "team_familiarity": 8
+>     }
+>   },
+>   "thresholds": {
+>     "strong": 8.0,
+>     "recommended": 6.0,
+>     "tie_gap": 0.2
+>   }
+> }
+> ```
+>
+> 机器可读配置（YAML）：
+> ```yaml
+> weights:
+>   deployment_constraint: 0.25
+>   latency_sensitivity: 0.20
+>   concurrency_need: 0.15
+>   dev_speed: 0.15
+>   observability: 0.10
+>   team_familiarity: 0.15
+> candidates:
+>   Rust:
+>     deployment_constraint: 9
+>     latency_sensitivity: 10
+>     concurrency_need: 9
+>     dev_speed: 4
+>     observability: 8
+>     team_familiarity: 7
+>   Go:
+>     deployment_constraint: 8
+>     latency_sensitivity: 8
+>     concurrency_need: 8
+>     dev_speed: 7
+>     observability: 8
+>     team_familiarity: 7
+>   Node.js:
+>     deployment_constraint: 4
+>     latency_sensitivity: 6
+>     concurrency_need: 7
+>     dev_speed: 9
+>     observability: 7
+>     team_familiarity: 9
+>   Python:
+>     deployment_constraint: 4
+>     latency_sensitivity: 5
+>     concurrency_need: 6
+>     dev_speed: 9
+>     observability: 7
+>     team_familiarity: 8
+> thresholds:
+>   strong: 8.0
+>   recommended: 6.0
+>   tie_gap: 0.2
+> ```
+>
+> Python 决策脚本（可直接执行）：
+> ```python
+> import json
+> from typing import Dict, List, Tuple
+>
+> WEIGHTS = {
+>     "deployment_constraint": 0.25,
+>     "latency_sensitivity": 0.20,
+>     "concurrency_need": 0.15,
+>     "dev_speed": 0.15,
+>     "observability": 0.10,
+>     "team_familiarity": 0.15,
+> }
+>
+> CANDIDATES = {
+>     "Rust": {
+>         "deployment_constraint": 9,
+>         "latency_sensitivity": 10,
+>         "concurrency_need": 9,
+>         "dev_speed": 4,
+>         "observability": 8,
+>         "team_familiarity": 7,
+>     },
+>     "Go": {
+>         "deployment_constraint": 8,
+>         "latency_sensitivity": 8,
+>         "concurrency_need": 8,
+>         "dev_speed": 7,
+>         "observability": 8,
+>         "team_familiarity": 7,
+>     },
+>     "Node.js": {
+>         "deployment_constraint": 4,
+>         "latency_sensitivity": 6,
+>         "concurrency_need": 7,
+>         "dev_speed": 9,
+>         "observability": 7,
+>         "team_familiarity": 9,
+>     },
+>     "Python": {
+>         "deployment_constraint": 4,
+>         "latency_sensitivity": 5,
+>         "concurrency_need": 6,
+>         "dev_speed": 9,
+>         "observability": 7,
+>         "team_familiarity": 8,
+>     },
+> }
+>
+>
+> def score_stack(input_scores: Dict[str, float], candidate: Dict[str, float]) -> float:
+>     total = 0.0
+>     for key, weight in WEIGHTS.items():
+>         if key not in input_scores:
+>             continue
+>         # 0..10 -> 0..1 normalized value to preserve weighting semantics
+>         normalized = input_scores[key] / 10.0
+>         total += weight * (normalized * candidate[key] / 10.0)
+>     return round(total * 10.0, 2)
+>
+>
+> def recommend(input_scores: Dict[str, float]) -> Dict:
+>     scored = {
+>         name: score_stack(input_scores, cfg)
+>         for name, cfg in CANDIDATES.items()
+>     }
+>     ranked = sorted(scored.items(), key=lambda x: x[1], reverse=True)
+>     primary, primary_score = ranked[0]
+>     secondary, secondary_score = ranked[1]
+>     tie_gap = 0.2
+>     rationale = (
+>         f"{primary} 在部署约束与性能需求上最优，综合评分 {primary_score}。"
+>         f" {secondary} 作为备选，评分 {secondary_score}。"
+>     )
+>     if primary_score >= 8.0:
+>         status = "strong"
+>     elif primary_score >= 6.0:
+>         status = "recommended"
+>     else:
+>         status = "experimental"
+>     if primary_score - secondary_score < tie_gap:
+>         rationale += " 前两名差距较小，建议根据团队熟悉度或用户偏好最终选型。"
+>     return {
+>         "status": status,
+>         "primary": primary,
+>         "secondary": secondary,
+>         "scores": scored,
+>         "rationale": rationale,
+>         "compile_run_notes": (
+>             "若部署需单静态二进制优先 Rust/Go；若交付速度优先选 Node.js 或 FastAPI；"
+>             "如果处理 SSE/高并发流式场景，优先考虑 Rust 或 Go。"
+>         ),
+>     }
+>
+>
+> if __name__ == "__main__":
+>     sample = {
+>         "deployment_constraint": 9,
+>         "latency_sensitivity": 8,
+>         "concurrency_need": 8,
+>         "dev_speed": 7,
+>         "observability": 8,
+>         "team_familiarity": 7,
+>     }
+>     print(json.dumps(recommend(sample), ensure_ascii=False, indent=2))
+> ```
+>
+> 使用方式：
+> - 若需更贴近生产：把 `deployment_constraint` 和 `latency_sensitivity` 提升，Rust 更容易胜出。
+> - 若追求快速迭代：把 `dev_speed` 和 `team_familiarity` 提升，Node.js / Python 更可能成为主推荐。
+> - 若追求轻量化部署：优先模型输出 `Go` 或 `Rust`，并附带 `musl + static binary` 的编译建议。
+>
+> 最终推荐写法：生成器必须同时输出（1）数值型得分，（2）选择理由短文，（3）主/备推荐与依赖列表，以及（4）编译/运行/部署要点。并在必要时附带选择依据与备选方案，用于评审和迭代。
 
 ---
 
 ## 角色
 
-你是一名资深后端架构师。请按照本规格实现一个生产可用的『AI 账号池代理网关』后端服务。该网关把多个上游 AI 账号（OAuth Token 或 AK/SK 凭据）��[...]
+你是一名资深后端架构师。请按照本规格实现一个生产可用的『AI 账号池代理网关』后端服务。该网关把多个上游 AI 账号（OAuth Token 或 AK/SK 凭据）包装[...] 
 
 ---
 
@@ -69,36 +280,36 @@
 | POST | /v1/messages | 【扩展】Anthropic Messages 协议适配，让 Claude Code CLI 可直连 |
 
 ### 1.2 请求处理流水线（严格按序）
-1. **鉴权**：从 `Authorization: Bearer <key>` 或 `X-Api-Key` 提取密钥；密钥以 SHA-256 哈希落库，校验时比对哈希。每把密钥独立校验：启用状态、过期时间、T[...]
-2. **路由解析**：把客户端请求的模型名解析为实际上游模型：自定义别名（精确匹配优先）→ 正则规则 → 内置档位表 → 原样透传。命中后台任务�[...]
-3. **账号选择**：在健康账号子集内轮询（round-robin）。选择前先执行冷却恢复（冷却到期的账号自动恢复 active）。支持会话粘性：`X-Session-ID` 头或 bo[...]
-4. **熔断检查**：每账号一个三态熔断器（closed/open/half-open）。closed 连续失败达阈值（默认 20）切 open；open 冷却期（默认 30 秒）过后放行唯一探测请[...]
-5. **上游调用 + 重试**：失败时按『可重试错误』（5xx/429/网络错误/401）换账号重试，最多 3 次，线性退避 (attempt+1)×500ms，等待期间响应客户端取消��[...]
+1. **鉴权**：从 `Authorization: Bearer <key>` �� `X-Api-Key` 提取密钥；密钥以 SHA-256 哈希落库，校验时比对哈希。每把密钥独立校验：启用状态、过期时间、Token 配额与 IP 约束；启动参数校验并写审计。
+2. **路由解析**：把客户端请求的模型名解析为实际上游模型：自定义别名（精确匹配优先）→ 正则规则 → 内置档位表 → 原样透传。命中后台任务标记后置兜底逻辑，并支持降级规则。
+3. **账号选择**：在健康账号子集内轮询（round-robin）。选择前先执行冷却恢复（冷却到期的账号自动恢复 active）。支持会话粘性：`X-Session-ID` 头或 body 中的 session_id，建立“模型/密钥/账号”绑定并超时清理。
+4. **熔断检查**：每账号一个三态熔断器（closed/open/half-open）。closed 连续失败达阈值（默认 20）切 open；open 冷却期（默认 30 秒）过后放行唯一探测请求；half-open 允许单次恢复探测并按结果恢复或重新打开。
+5. **上游调用 + 重试**：失败时按『可重试错误』（5xx/429/网络错误/401）换账号重试，最多 3 次，线性退避 (attempt+1)×500ms，等待期间响应客户端取消。
 6. **用量记账**：请求完成后按密钥累计 token 消耗（用于配额判定）。
 
 ### 1.3 流式响应（SSE）处理
 - 上游 SSE 原样透传给客户端，不缓冲、不改写。
-- **旁路审计**（不干扰数据流）：记录首字延迟（从请求发起到第一帧到达的毫秒数）；从结束帧提取 token 用量、实际扣费（usage.credit）、提示词缓[...]
+- **旁路审计**（不干扰数据流）：记录首字延迟（从请求发起到第一帧到达的毫秒数）；从结束帧提取 token 用量、实际扣费（usage.credit）、提示词缓存命中率等字段；失败时保留 `—` 而不是 `0`。
 - 非流式请求：上游即便在非流式也可能返回 SSE 体，需按『直接 JSON → 剥离 data: 前缀 → SSE 聚合』三级解析。
 
 ### 1.4 错误格式
-统一 OpenAI 错误信封 `{"error":{"message","type","code"}}`；状态码映射：unauthorized=401 / bad_request=400 / rate_limited=429 / unavailable=503 / bad_gateway=502 / internal=500。请�[...]
+统一 OpenAI 错误信封 `{"error":{"message","type","code"}}`；状态码映射：unauthorized=401 / bad_request=400 / rate_limited=429 / unavailable=503 / bad_gateway=502 / internal=500。请求参数/认证错误必须返回标准化结构。
 
 ---
 
 ## 二、账号池管理
 
-- 账号字段：id、名称、凭据（AES-256-GCM 加密存储，密钥=SHA256(secret)，nonce 前置拼接密文后 base64）、状态（active/disabled/cooling）、连续失败计数、最近[...]
+- 账号字段：id、名称、凭据（AES-256-GCM 加密存储，密钥=SHA256(secret)，nonce 前置拼接密文后 base64）、状态（active/disabled/cooling）、连续失败计数、最近失败时间等；支持安全脱敏展示。
 - 状态机：active 正常参与调度；disabled 不参与调度但签到/保活等任务照常；cooling 由失败阈值触发，冷却到期自动恢复。
 - 账号 CRUD 后原子化持久化（临时文件 + rename），文件权限 0600。
 - 支持扫码/OAuth 纳管入口（未配置时返回 501 而非报错）。
-- 【参考 workbuddy】账号分组（多账号池）：每组可绑定独立���游实例；密钥可绑定分组，请求只走该组账号池；未绑定分组只读不做账号管理。
+- 【参考 workbuddy】账号分组（多账号池）：每组可绑定独立上游实例；密钥可绑定分组，请求只走该组账号池；未绑定分组只读不做账号管理。
 
 ---
 
 ## 三、多密钥分发
 
-每把密钥独立字段：名称、SHA-256 哈希（明文仅创建时展示一次）、掩码提示（前4...后4）、创建时间、过期时间（可空=永不过期）、Token 配额（0=不[...]
+每把密钥独立字段：名称、SHA-256 哈希（明文仅创建时展示一次）、掩码提示（前4...后4）、创建时间、过期时间（可空=永不过期）、Token 配额（0=不限）、速率限制与版本限制。
 可选增强：IP 白名单（CIDR）、最大并发 IP 数、限定版本（国内版/国际版标签）。
 密钥持久化到独立 JSON 文件；主密钥（启动参数传入）在密钥文件为空时自动作为 master 保留。
 
@@ -106,14 +317,14 @@
 
 ## 四、全量审计日志
 
-每次数据面调用记录：时间、方法、路径、模型（客户端请求名）、密钥名称、来源 IP（X-Forwarded-For 优先，回退 X-Real-IP，再回退连接地址）、状态��[...]
+每次数据面调用记录：时间、方法、路径、模型（客户端请求名）、密钥名称、来源 IP（X-Forwarded-For 优先，回退 X-Real-IP，再回退连接地址）、状态码、耗时、token 统计；支持按天/按模型/按密钥聚合统计。
 存储：默认内存环形缓冲（容量 500，可配），并提供按天/按模型/按密钥的聚合统计接口；可选扩展为 JSONL 按天落盘或 SQLite 持久化。
 
 ---
 
 ## 五、定时任务框架
 
-- 任务注册表：每类任务（每日签到领积分、Token 保活、自动续期、积分快照采集）独立开关与执行时刻（cron 或整点数���）。
+- 任务注册表：每类任务（每日签到领积分、Token 保活、自动续期、积分快照采集）独立开关与执行时刻（cron 或整点数组）。
 - 任务执行结果与积分收益留痕（如『签到 +1000（30588 → 31588）』），支持按类型筛选与累计汇总。
 - 任务失败触发告警钩子（OnFailure 执行通知命令）。
 - 实现建议：优先用 systemd timer 或独立调度线程，幂等设计（今日已领取 = 正常跳过）。
@@ -122,11 +333,11 @@
 
 ## 六、上游协议适配层（以华为云 CodeArts MaaS 为例，可替换）
 
-- 签名：SDK-HMAC-SHA256。日期头 X-Sdk-Date（UTC，YYYYMMDDTHHMMSSZ）；body 非空时设 X-Sdk-Content-Sha256；CanonicalURI 按 / 分段逐段 urlEncode（保留 A-Za-z0-9-_.~+）末尾�[...]
+- 签名：SDK-HMAC-SHA256。日期头 X-Sdk-Date（UTC，YYYYMMDDTHHMMSSZ）；body 非空时设 X-Sdk-Content-Sha256；CanonicalURI 按 / 分段逐段 urlEncode（保留 A-Za-z0-9-_.~+）末尾强制补齐 /；统一签名流程。
 - 会话管理：聊天前持有 MaaS 会话（POST /v1/sessions，Agent-Type: PromptCenter），缓存复用 50 分钟，互斥保护；聊天请求携带 x-ot-session-id 与 user-session-id。
 - 模型清单：从统计接口动态拉取（enable=true 且 status=normal），10 分钟缓存，内置黑名单过滤实测不可用模型，失败回落静态兜底列表。
 - 档位别名：对外暴露 auto/fast/balanced/primary/deep 等档位名，网关侧解析为具体模型并注入默认思考档位（reasoning_effort），客户端显式指定时优先。
-- 工具调用：请求含 tools 时向 system 消息追加 XML 工具调用格式提示，保证下游客户端可解析。
+- 工具调用：请求含 tools 时向 system 消息追加 XML 工具调用格式��示，保证下游客户端可解析。
 
 ---
 
@@ -151,8 +362,8 @@
 
 ## 八、非功能要求
 
-1. **配置**：全部运行参数可经启动参数或配置文件注入（监听地址、加密密���、存储路径、上游 AK/SK、主密钥、熔断/重试/会话参数，默认值见[...]
-2. **存储**：默认 JSON 文件（账号/密钥/路由），原子写入；可选 SQLite/PostgreSQL ���配层，接口抽象便于替换。
+1. **配置**：全部运行参数可经启动参数或配置文件注入（监听地址、加密密钥、存储路径、上游 AK/SK、主密钥、熔断/重试/会话参数等）。
+2. **存储**：默认 JSON 文件（账号/密钥/路由），原子写入；可选 SQLite/PostgreSQL 适配层，接口抽象便于替换。
 3. **日志**：终端日志对 Authorization 头脱敏（Bearer ***）；结构化请求日志。
 4. **部署**：单静态二进制（musl 编译），前端静态产物内嵌，无外部运行时依赖；systemd 托管，Restart=on-failure。
 5. **安全**：凭据 AES-256-GCM 加密；密钥 SHA-256 哈希；管理面与数据面共用密钥但仅放行已启用未过期密钥；HSTS/安全响应头（经反代层）。
@@ -179,9 +390,9 @@
 
 ## 验收标准（实现完成后逐项自测）
 
-1. 携带有效密钥调用 /v1/chat/completions（流式与非流式）返回正常，错误密钥返回 401 标准错误信封。
+1. 携带有效密钥调用 /v1/chat/completions（流式与非流式）返回正常，错误密钥返回 401 标准错��信封。
 2. 创建别名规则后，用别名请求被正确路由到目标模型，/v1/models 同步出现别名。
-3. 新建密钥可独立设置配额，配额用尽后��密钥返回 429，其他密钥不受影响。
+3. 新建密钥可独立设置配额，配额用尽后该密钥返回 429，其他密钥不受影响。
 4. 流式调用后审计日志包含首字延迟、token 用量；上游未返回扣费时该字段显示为『—』而非 0。
 5. 账号连续失败触发冷却，冷却期后自动恢复；熔断器三态切换正确。
 6. 定时任务到点执行且幂等，结果留痕可查。
