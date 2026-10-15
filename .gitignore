@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/out/_next/
+web/out/*.html.bak
+
+# Secrets & local config
+.env
+.env.*
+accounts.json
+*.local
+
+# Editor & OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Logs
+*.log
