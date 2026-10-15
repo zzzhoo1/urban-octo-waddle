@@ -91,30 +91,32 @@ export default function StatsPage() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5 mb-6">
-        {(loading ? Array.from({ length: 5 }) : cards).map((c, i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.05, duration: 0.3 }}
-          >
-            <Card>
-              <CardContent className="pt-6">
-                {loading || !('label' in c) ? (
+        {loading
+          ? Array.from({ length: 5 }).map((_, i) => (
+              <Card key={i}>
+                <CardContent className="pt-6">
                   <Skeleton className="h-14 w-full" />
-                ) : (
-                  <div className="flex items-center justify-between">
+                </CardContent>
+              </Card>
+            ))
+          : cards.map((c, i) => (
+              <motion.div
+                key={c.label}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.05, duration: 0.3 }}
+              >
+                <Card>
+                  <CardContent className="pt-6 flex items-center justify-between">
                     <div>
                       <div className="text-xs text-[var(--muted-foreground)]">{c.label}</div>
                       <div className="text-xl font-bold mt-1">{c.value}</div>
                     </div>
                     <c.icon className={`h-7 w-7 ${c.color}`} />
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </motion.div>
-        ))}
+                  </CardContent>
+                </Card>
+              </motion.div>
+            ))}
       </div>
 
       {empty ? (
