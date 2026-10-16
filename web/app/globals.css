@@ -79,10 +79,32 @@
   * {
     border-color: var(--color-border);
   }
+  html,
+  body {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  /* 图表与媒体内容不超出容器 */
+  .recharts-responsive-container {
+    max-width: 100%;
+  }
+  img,
+  svg,
+  video,
+  canvas {
+    max-width: 100%;
+    height: auto;
+  }
+  /* 窄屏下输入框不溢出 */
+  input,
+  select,
+  textarea {
+    max-width: 100%;
   }
 }

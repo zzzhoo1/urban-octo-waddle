@@ -37,9 +37,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
     router.push("/login");
   };
 
+  const isActive = (href: string) =>
+    href === "/" ? pathname === "/" : pathname.startsWith(href);
+
   return (
     <div className="flex min-h-screen">
-      <aside className="w-56 shrink-0 border-r border-[var(--border)] bg-[var(--card)] flex flex-col">
+      {/* 桌面端侧边栏（md 及以上显示） */}
+      <aside className="hidden md:flex w-56 shrink-0 border-r border-[var(--border)] bg-[var(--card)] flex-col">
         <div className="px-5 py-5 border-b border-[var(--border)]">
           <div className="flex items-center gap-2">
             <Activity className="h-5 w-5 text-[var(--primary)]" />
@@ -50,25 +54,21 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         <nav className="flex-1 p-3 space-y-1">
-          {NAV.map((item) => {
-            const active =
-              item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-                  active
-                    ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
-                    : "text-[var(--foreground)] hover:bg-[var(--accent)]"
-                )}
-              >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-              </Link>
-            );
-          })}
+          {NAV.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+                isActive(item.href)
+                  ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
+                  : "text-[var(--foreground)] hover:bg-[var(--accent)]"
+              )}
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </Link>
+          ))}
         </nav>
         <div className="p-3 border-t border-[var(--border)]">
           <Button variant="ghost" size="sm" className="w-full justify-start" onClick={logout}>
@@ -77,7 +77,41 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </Button>
         </div>
       </aside>
-      <main className="flex-1 min-w-0 p-6">{children}</main>
+
+      {/* 主内容区 */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* 移动端顶部栏（md 以下显示） */}
+        <div className="md:hidden sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--card)]">
+          <div className="flex items-center justify-between px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <Activity className="h-5 w-5 text-[var(--primary)]" />
+              <span className="text-sm font-semibold">CodeArts 网关</span>
+            </div>
+            <Button variant="ghost" size="sm" onClick={logout}>
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
+          <nav className="flex gap-1 px-2 pb-2 overflow-x-auto">
+            {NAV.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs whitespace-nowrap transition-colors shrink-0",
+                  isActive(item.href)
+                    ? "bg-[var(--primary)] text-[var(--primary-foreground)]"
+                    : "text-[var(--foreground)] hover:bg-[var(--accent)]"
+                )}
+              >
+                <item.icon className="h-3.5 w-3.5" />
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+        </div>
+
+        <main className="flex-1 min-w-0 p-3 md:p-6">{children}</main>
+      </div>
     </div>
   );
 }
