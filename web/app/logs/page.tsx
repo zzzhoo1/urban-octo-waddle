@@ -42,6 +42,34 @@ const RANGES = [
 
 const PAGE_LIMIT = 200;
 
+/** 移动端纵向卡片：一条日志一张卡，字段逐行展示 */
+function LogCard({ log }: { log: RequestLog }) {
+  const rows: Array<[string, React.ReactNode]> = [
+    ["模型", <span key="m" className="font-medium">{log.model || "-"}</span>],
+    ["状态码", statusBadge(log.status)],
+    ["密钥", log.key_name || "-"],
+    ["来源 IP", <span key="ip" className="font-mono text-xs">{log.source_ip || "-"}</span>],
+    ["首字延迟", dash(log.ttft_ms && log.ttft_ms > 0 ? log.ttft_ms : undefined, formatLatency)],
+    ["总耗时", formatLatency(log.latency_ms)],
+    ["Token", log.total_tokens ? log.total_tokens.toLocaleString() : "—"],
+    ["实际扣费", dash(log.credit)],
+    ["缓存命中", dash(log.cached_tokens, (n) => n.toLocaleString())],
+  ];
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 space-y-1.5">
+      <div className="text-xs text-[var(--muted-foreground)] pb-1 border-b border-[var(--border)]">
+        {formatTime(log.ts)}
+      </div>
+      {rows.map(([label, value]) => (
+        <div key={label} className="flex items-center justify-between text-sm">
+          <span className="text-[var(--muted-foreground)] text-xs">{label}</span>
+          <span>{value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,14 +109,14 @@ export default function LogsPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold">调用日志</h1>
           <p className="text-sm text-[var(--muted-foreground)]">
             共 {filtered.length} 条{capped ? `，仅显示最近 ${PAGE_LIMIT} 条` : ""}，每 30 秒自动刷新
           </p>
         </div>
-        <div className="flex gap-2 items-center">
+        <div className="flex gap-2 items-center flex-wrap">
           <div className="flex rounded-md border border-[var(--border)] overflow-hidden">
             {RANGES.map((r) => (
               <button
@@ -112,64 +140,76 @@ export default function LogsPage() {
       </div>
 
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
-        <Card>
-          <CardContent className="pt-6">
-            {loading ? (
-              <div className="space-y-3">
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-              </div>
-            ) : shown.length === 0 ? (
-              <div className="py-16 text-center text-sm text-[var(--muted-foreground)]">
-                该时间范围内暂无调用记录
-              </div>
-            ) : (
-              <div className="max-h-[65vh] overflow-y-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>模型</TableHead>
-                      <TableHead>密钥</TableHead>
-                      <TableHead>来源 IP</TableHead>
-                      <TableHead>状态码</TableHead>
-                      <TableHead>首字延迟</TableHead>
-                      <TableHead>总耗时</TableHead>
-                      <TableHead>Token</TableHead>
-                      <TableHead>实际扣费</TableHead>
-                      <TableHead>缓存命中</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {shown.map((log, i) => (
-                      <TableRow key={`${log.ts}-${i}`}>
-                        <TableCell className="text-[var(--muted-foreground)] whitespace-nowrap">
-                          {formatTime(log.ts)}
-                        </TableCell>
-                        <TableCell className="font-medium">{log.model || "-"}</TableCell>
-                        <TableCell className="text-xs">{log.key_name || "-"}</TableCell>
-                        <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
-                          {log.source_ip || "-"}
-                        </TableCell>
-                        <TableCell>{statusBadge(log.status)}</TableCell>
-                        <TableCell>{dash(log.ttft_ms && log.ttft_ms > 0 ? log.ttft_ms : undefined, formatLatency)}</TableCell>
-                        <TableCell>{formatLatency(log.latency_ms)}</TableCell>
-                        <TableCell>
-                          {log.total_tokens
-                            ? `${log.total_tokens.toLocaleString()}`
-                            : "—"}
-                        </TableCell>
-                        <TableCell>{dash(log.credit)}</TableCell>
-                        <TableCell>{dash(log.cached_tokens, (n) => n.toLocaleString())}</TableCell>
+        {loading ? (
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </CardContent>
+          </Card>
+        ) : shown.length === 0 ? (
+          <Card>
+            <CardContent className="py-16 text-center text-sm text-[var(--muted-foreground)]">
+              该时间范围内暂无调用记录
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            {/* 桌面端：表格视图（md 及以上显示） */}
+            <Card className="hidden md:block">
+              <CardContent className="pt-6">
+                <div className="max-h-[65vh] overflow-y-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>时间</TableHead>
+                        <TableHead>模型</TableHead>
+                        <TableHead>密钥</TableHead>
+                        <TableHead>来源 IP</TableHead>
+                        <TableHead>状态码</TableHead>
+                        <TableHead>首字延迟</TableHead>
+                        <TableHead>总耗时</TableHead>
+                        <TableHead>Token</TableHead>
+                        <TableHead>实际扣费</TableHead>
+                        <TableHead>缓存命中</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                    </TableHeader>
+                    <TableBody>
+                      {shown.map((log, i) => (
+                        <TableRow key={`${log.ts}-${i}`}>
+                          <TableCell className="text-[var(--muted-foreground)] whitespace-nowrap">
+                            {formatTime(log.ts)}
+                          </TableCell>
+                          <TableCell className="font-medium">{log.model || "-"}</TableCell>
+                          <TableCell className="text-xs">{log.key_name || "-"}</TableCell>
+                          <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
+                            {log.source_ip || "-"}
+                          </TableCell>
+                          <TableCell>{statusBadge(log.status)}</TableCell>
+                          <TableCell>{dash(log.ttft_ms && log.ttft_ms > 0 ? log.ttft_ms : undefined, formatLatency)}</TableCell>
+                          <TableCell>{formatLatency(log.latency_ms)}</TableCell>
+                          <TableCell>
+                            {log.total_tokens ? `${log.total_tokens.toLocaleString()}` : "—"}
+                          </TableCell>
+                          <TableCell>{dash(log.credit)}</TableCell>
+                          <TableCell>{dash(log.cached_tokens, (n) => n.toLocaleString())}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* 移动端：纵向卡片视图（md 以下显示） */}
+            <div className="md:hidden space-y-3 max-h-[70vh] overflow-y-auto">
+              {shown.map((log, i) => (
+                <LogCard key={`${log.ts}-${i}`} log={log} />
+              ))}
+            </div>
+          </>
+        )}
       </motion.div>
     </Shell>
   );

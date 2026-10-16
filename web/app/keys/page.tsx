@@ -46,6 +46,53 @@ function quotaText(k: ApiKeyInfo): string {
   return `${k.tokens_used.toLocaleString()} / ${k.token_quota.toLocaleString()} (${pct}%)`;
 }
 
+/** 移动端纵向卡片：一把密钥一张卡 */
+function KeyCard({
+  k,
+  onToggle,
+  onDelete,
+}: {
+  k: ApiKeyInfo;
+  onToggle: (k: ApiKeyInfo, enabled: boolean) => void;
+  onDelete: (k: ApiKeyInfo) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 space-y-1.5">
+      <div className="flex items-center justify-between pb-1 border-b border-[var(--border)]">
+        <span className="font-medium text-sm">{k.name}</span>
+        {keyStatusBadge(k)}
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">密钥</span>
+        <span className="font-mono text-xs">{k.hint}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">用量/配额</span>
+        <span className="text-xs">{quotaText(k)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">模型白名单</span>
+        <span className="text-xs">
+          {k.model_allowlist.length === 0 ? "全部模型" : k.model_allowlist.join(", ")}
+        </span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">过期时间</span>
+        <span className="text-xs">{k.expires_at ? formatTime(k.expires_at) : "永不过期"}</span>
+      </div>
+      <div className="flex items-center justify-between pt-1">
+        <div className="flex items-center gap-2">
+          <Switch checked={k.enabled} onCheckedChange={(c) => onToggle(k, c)} />
+          <span className="text-xs text-[var(--muted-foreground)]">{k.enabled ? "已启用" : "已禁用"}</span>
+        </div>
+        <Button variant="ghost" size="icon" onClick={() => onDelete(k)}>
+          <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function KeysPage() {
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -142,11 +189,11 @@ export default function KeysPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold">密钥分发</h1>
           <p className="text-sm text-[var(--muted-foreground)]">
-            共 {keys.length} 把密钥，各自独立配额与模型白名单；完整密钥仅在创建时可见
+            共 {keys.length} 把密钥，各自独立配额与模型白名单
           </p>
         </div>
         <div className="flex gap-2">
@@ -162,70 +209,84 @@ export default function KeysPage() {
       </div>
 
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
-        <Card>
-          <CardContent className="pt-6">
-            {loading ? (
-              <div className="space-y-3">
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-              </div>
-            ) : keys.length === 0 ? (
-              <div className="py-16 text-center text-sm text-[var(--muted-foreground)]">
-                暂无密钥，点击右上角『新建密钥』创建第一把
-              </div>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>名称</TableHead>
-                    <TableHead>密钥</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>用量 / 配额</TableHead>
-                    <TableHead>模型白名单</TableHead>
-                    <TableHead>过期时间</TableHead>
-                    <TableHead>启用</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {keys.map((k) => (
-                    <TableRow key={k.name}>
-                      <TableCell className="font-medium">{k.name}</TableCell>
-                      <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
-                        {k.hint}
-                      </TableCell>
-                      <TableCell>{keyStatusBadge(k)}</TableCell>
-                      <TableCell className="text-sm">{quotaText(k)}</TableCell>
-                      <TableCell className="text-xs text-[var(--muted-foreground)]">
-                        {k.model_allowlist.length === 0
-                          ? "全部模型"
-                          : k.model_allowlist.join(", ")}
-                      </TableCell>
-                      <TableCell className="text-[var(--muted-foreground)]">
-                        {k.expires_at ? formatTime(k.expires_at) : "永不过期"}
-                      </TableCell>
-                      <TableCell>
-                        <Switch
-                          checked={k.enabled}
-                          onCheckedChange={(checked) => toggle(k, checked)}
-                        />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setDeleteTarget(k)}
-                        >
-                          <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
-                        </Button>
-                      </TableCell>
+        {loading ? (
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </CardContent>
+          </Card>
+        ) : keys.length === 0 ? (
+          <Card>
+            <CardContent className="py-16 text-center text-sm text-[var(--muted-foreground)]">
+              暂无密钥，点击右上角『新建密钥』创建第一把
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            {/* 桌面端：表格视图 */}
+            <Card className="hidden md:block">
+              <CardContent className="pt-6">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>名称</TableHead>
+                      <TableHead>密钥</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>用量 / 配额</TableHead>
+                      <TableHead>模型白名单</TableHead>
+                      <TableHead>过期时间</TableHead>
+                      <TableHead>启用</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+                  </TableHeader>
+                  <TableBody>
+                    {keys.map((k) => (
+                      <TableRow key={k.name}>
+                        <TableCell className="font-medium">{k.name}</TableCell>
+                        <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
+                          {k.hint}
+                        </TableCell>
+                        <TableCell>{keyStatusBadge(k)}</TableCell>
+                        <TableCell className="text-sm">{quotaText(k)}</TableCell>
+                        <TableCell className="text-xs text-[var(--muted-foreground)]">
+                          {k.model_allowlist.length === 0
+                            ? "全部模型"
+                            : k.model_allowlist.join(", ")}
+                        </TableCell>
+                        <TableCell className="text-[var(--muted-foreground)]">
+                          {k.expires_at ? formatTime(k.expires_at) : "永不过期"}
+                        </TableCell>
+                        <TableCell>
+                          <Switch
+                            checked={k.enabled}
+                            onCheckedChange={(checked) => toggle(k, checked)}
+                          />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setDeleteTarget(k)}
+                          >
+                            <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+
+            {/* 移动端：纵向卡片视图 */}
+            <div className="md:hidden space-y-3">
+              {keys.map((k) => (
+                <KeyCard key={k.name} k={k} onToggle={toggle} onDelete={setDeleteTarget} />
+              ))}
+            </div>
+          </>
+        )}
       </motion.div>
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
@@ -262,7 +323,7 @@ export default function KeysPage() {
                 </Button>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label htmlFor="key-expires">过期时间（可选）</Label>
                 <Input
