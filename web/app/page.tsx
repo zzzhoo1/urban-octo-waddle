@@ -35,6 +35,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  AnimatedNumber,
+  HoverCard,
+  PulseDot,
+  FlashWrapper,
+} from "@/components/motion-primitives";
 
 const STATUS_COLORS: Record<string, string> = {
   "健康": "#22c55e",
@@ -84,7 +90,6 @@ export default function DashboardPage() {
   );
 
   const trendData = useMemo(() => {
-    // Group recent logs by minute for the last ~30 entries.
     const recent = [...logs].slice(0, 60).reverse();
     return recent.map((l, i) => ({
       idx: i,
@@ -95,17 +100,20 @@ export default function DashboardPage() {
   }, [logs]);
 
   const cards = [
-    { label: "账号总数", value: summary.total, icon: Users, color: "text-[var(--primary)]" },
-    { label: "健康账号", value: summary.healthy, icon: CheckCircle2, color: "text-green-500" },
-    { label: "冷却中", value: summary.cooling, icon: ShieldAlert, color: "text-amber-500" },
-    { label: "已禁用", value: summary.disabled, icon: PauseCircle, color: "text-slate-400" },
+    { label: "账号总数", value: summary.total, icon: Users, color: "text-[var(--primary)]", pulse: false },
+    { label: "健康账号", value: summary.healthy, icon: CheckCircle2, color: "text-green-500", pulse: true },
+    { label: "冷却中", value: summary.cooling, icon: ShieldAlert, color: "text-amber-500", pulse: false },
+    { label: "已禁用", value: summary.disabled, icon: PauseCircle, color: "text-slate-400", pulse: false },
   ];
 
   return (
     <Shell>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold">仪表盘</h1>
+          <h1 className="text-xl font-semibold flex items-center gap-2">
+            仪表盘
+            {summary.healthy > 0 && <PulseDot />}
+          </h1>
           <p className="text-sm text-[var(--muted-foreground)]">账号健康与请求概览</p>
         </div>
         <Button variant="outline" size="sm" onClick={load}>
@@ -114,27 +122,34 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
+      <div className="grid gap-4 grid-cols-2 lg:grid-cols-4 mb-6">
         {cards.map((c, i) => (
           <motion.div
             key={c.label}
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.05, duration: 0.3 }}
+            transition={{ delay: i * 0.06, duration: 0.35, ease: "easeOut" }}
           >
-            <Card>
-              <CardContent className="pt-6 flex items-center justify-between">
-                <div>
-                  <div className="text-sm text-[var(--muted-foreground)]">{c.label}</div>
-                  {loading ? (
-                    <Skeleton className="h-8 w-16 mt-1" />
-                  ) : (
-                    <div className="text-2xl font-bold mt-1">{c.value}</div>
-                  )}
-                </div>
-                <c.icon className={`h-8 w-8 ${c.color}`} />
-              </CardContent>
-            </Card>
+            <HoverCard>
+              <Card>
+                <CardContent className="pt-6 flex items-center justify-between">
+                  <div>
+                    <div className="text-xs sm:text-sm text-[var(--muted-foreground)]">
+                      {c.label}
+                    </div>
+                    {loading ? (
+                      <Skeleton className="h-8 w-16 mt-1" />
+                    ) : (
+                      <div className="text-2xl font-bold mt-1 flex items-center gap-2">
+                        <AnimatedNumber value={c.value} />
+                        {c.pulse && c.value > 0 && <PulseDot className="mt-1" />}
+                      </div>
+                    )}
+                  </div>
+                  <c.icon className={`h-7 w-7 sm:h-8 sm:w-8 ${c.color}`} />
+                </CardContent>
+              </Card>
+            </HoverCard>
           </motion.div>
         ))}
       </div>
@@ -143,84 +158,92 @@ export default function DashboardPage() {
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2, duration: 0.3 }}
+          transition={{ delay: 0.25, duration: 0.35, ease: "easeOut" }}
         >
-          <Card>
-            <CardHeader>
-              <CardTitle>账号状态分布</CardTitle>
-              <CardDescription>按健康状态统计</CardDescription>
-            </CardHeader>
-            <CardContent className="h-64">
-              {loading ? (
-                <Skeleton className="h-full w-full" />
-              ) : pieData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-[var(--muted-foreground)]">
-                  暂无账号，请先前往账号管理添加
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      dataKey="value"
-                      nameKey="name"
-                      innerRadius={55}
-                      outerRadius={85}
-                      paddingAngle={3}
-                    >
-                      {pieData.map((d) => (
-                        <Cell key={d.name} fill={STATUS_COLORS[d.name]} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
+          <HoverCard>
+            <Card>
+              <CardHeader>
+                <CardTitle>账号状态分布</CardTitle>
+                <CardDescription>按健康状态统计</CardDescription>
+              </CardHeader>
+              <CardContent className="h-64">
+                {loading ? (
+                  <Skeleton className="h-full w-full" />
+                ) : pieData.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-sm text-[var(--muted-foreground)]">
+                    暂无账号，请先前往账号管理添加
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={pieData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={55}
+                        outerRadius={85}
+                        paddingAngle={3}
+                        animationDuration={800}
+                      >
+                        {pieData.map((d) => (
+                          <Cell key={d.name} fill={STATUS_COLORS[d.name]} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
+              </CardContent>
+            </Card>
+          </HoverCard>
         </motion.div>
 
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.25, duration: 0.3 }}
+          transition={{ delay: 0.32, duration: 0.35, ease: "easeOut" }}
         >
-          <Card>
-            <CardHeader>
-              <CardTitle>最近请求延迟</CardTitle>
-              <CardDescription>按调用顺序展示（毫秒）</CardDescription>
-            </CardHeader>
-            <CardContent className="h-64">
-              {loading ? (
-                <Skeleton className="h-full w-full" />
-              ) : trendData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-[var(--muted-foreground)]">
-                  暂无调用记录
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={trendData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="idx" tick={false} stroke="var(--muted-foreground)" />
-                    <YAxis stroke="var(--muted-foreground)" fontSize={12} />
-                    <Tooltip
-                      formatter={((value: unknown) => [`${value}ms`, "延迟"]) as never}
-                      labelFormatter={((idx: unknown) =>
-                        trendData[Number(idx)]?.time ?? "") as never}
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="latency"
-                      stroke="var(--primary)"
-                      fill="var(--primary)"
-                      fillOpacity={0.15}
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
+          <HoverCard>
+            <Card>
+              <CardHeader>
+                <CardTitle>最近请求延迟</CardTitle>
+                <CardDescription>按调用顺序展示（毫秒）</CardDescription>
+              </CardHeader>
+              <CardContent className="h-64">
+                {loading ? (
+                  <Skeleton className="h-full w-full" />
+                ) : trendData.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-sm text-[var(--muted-foreground)]">
+                    暂无调用记录
+                  </div>
+                ) : (
+                  <FlashWrapper watch={trendData.length} className="h-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={trendData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                        <XAxis dataKey="idx" tick={false} stroke="var(--muted-foreground)" />
+                        <YAxis stroke="var(--muted-foreground)" fontSize={12} />
+                        <Tooltip
+                          formatter={((value: unknown) => [`${value}ms`, "延迟"]) as never}
+                          labelFormatter={((idx: unknown) =>
+                            trendData[Number(idx)]?.time ?? "") as never}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="latency"
+                          stroke="var(--primary)"
+                          fill="var(--primary)"
+                          fillOpacity={0.15}
+                          animationDuration={600}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </FlashWrapper>
+                )}
+              </CardContent>
+            </Card>
+          </HoverCard>
         </motion.div>
       </div>
     </Shell>
