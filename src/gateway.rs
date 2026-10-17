@@ -89,6 +89,16 @@ impl Gateway {
         self.keys.record_usage(fingerprint, tokens);
     }
 
+    /// A2: 数据面鉴权探测——校验密钥、触发旧摘要惰性升级，并返回是否
+    /// 有待落盘的升级（供 models/embeddings 路径在鉴权后落盘 keys.json）。
+    pub fn models_probe(&self, api_key: &str) -> bool {
+        if !self.keys.authenticate(api_key) {
+            return false;
+        }
+        self.keys.lazy_upgrade(api_key);
+        !self.keys.take_dirty().is_empty()
+    }
+
     fn retry_delay(&self, attempt: u32) -> Duration {
         if self.cfg.retry_backoff.is_zero() {
             Duration::ZERO
@@ -196,6 +206,8 @@ impl Gateway {
         if !self.keys.authenticate(api_key) {
             return Err(GatewayError::unauthorized("invalid api key"));
         }
+        // A2: 任何数据面成功鉴权都触发旧摘要惰性升级。
+        self.keys.lazy_upgrade(api_key);
         self.upstream.models().await
     }
 
@@ -207,6 +219,8 @@ impl Gateway {
         if !self.keys.authenticate(api_key) {
             return Err(GatewayError::unauthorized("invalid api key"));
         }
+        // A2: 任何数据面成功鉴权都触发旧摘要惰性升级。
+        self.keys.lazy_upgrade(api_key);
         Err(GatewayError::bad_gateway(
             "codearts upstream does not support embeddings",
         ))

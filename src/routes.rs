@@ -270,6 +270,12 @@ async fn handle_models(
 ) -> Response {
     let started = Instant::now();
     let api_key = extract_api_key(&headers);
+    // A2: 鉴权成功后若发生惰性升级，立即落盘 keys.json。
+    if state.gateway.models_probe(&api_key) {
+        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+            tracing::error!("failed to persist upgraded key hashes: {}", e);
+        }
+    }
     match state.gateway.models(&api_key).await {
         Ok(mut list) => {
             // Prepend user-defined aliases so clients can discover them.
@@ -312,6 +318,12 @@ async fn handle_embeddings(
     body: axum::body::Bytes,
 ) -> Response {
     let api_key = extract_api_key(&headers);
+    // A2: 鉴权成功后若发生惰性升级，立即落盘 keys.json。
+    if state.gateway.models_probe(&api_key) {
+        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+            tracing::error!("failed to persist upgraded key hashes: {}", e);
+        }
+    }
     let req: EmbeddingRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
