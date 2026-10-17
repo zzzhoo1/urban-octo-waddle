@@ -39,6 +39,23 @@ fn default_role() -> KeyRole {
     KeyRole::Admin
 }
 
+/// Deserialize a key role: missing/null -> admin (legacy compat), unknown
+/// string -> user with a WARN (A2 spec: 未知角色取值按 user 处理)。
+fn deserialize_role<'de, D>(d: D) -> Result<KeyRole, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(d)?;
+    Ok(match raw.as_deref() {
+        None | Some("admin") => KeyRole::Admin,
+        Some("user") => KeyRole::User,
+        Some(other) => {
+            tracing::warn!(role = %other, "unknown key role in keys.json, treated as user");
+            KeyRole::User
+        }
+    })
+}
+
 fn default_true() -> bool {
     true
 }
@@ -77,8 +94,9 @@ pub struct ApiKey {
     pub model_allowlist: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Admin or data-plane-only role. Missing in legacy data = admin.
-    #[serde(default = "default_role")]
+    /// Admin or data-plane-only role. Missing in legacy data = admin;
+    /// unknown values are treated as user with a WARN (A2).
+    #[serde(default = "default_role", deserialize_with = "deserialize_role")]
     pub role: KeyRole,
     /// True for the key injected via --gw-key; cannot be modified or deleted.
     #[serde(default)]
@@ -109,10 +127,14 @@ pub fn hash_key(plaintext: &str) -> String {
 }
 
 pub fn mask_key(plaintext: &str) -> String {
-    if plaintext.len() <= 8 {
+    // A1: 按字符而非字节切片，避免多字节字符在边界处 panic。
+    let chars: Vec<char> = plaintext.chars().collect();
+    if chars.len() <= 8 {
         return "****".to_string();
     }
-    format!("{}...{}", &plaintext[..4], &plaintext[plaintext.len() - 4..])
+    let prefix: String = chars[..4].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}...{}", prefix, suffix)
 }
 
 /// Deterministic lookup fingerprint: HMAC-SHA256 of the plaintext keyed by
@@ -122,8 +144,9 @@ pub fn mask_key(plaintext: &str) -> String {
 pub fn fingerprint_key(secret: &str, plaintext: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
-        .unwrap_or_else(|_| <Hmac<Sha256> as Mac>::new_from_slice(b"codearts-gw").expect("valid"));
+    type HmacSha256 = Hmac<Sha256>;
+    // HMAC accepts keys of any length, so this cannot fail.
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
     mac.update(b"key-fingerprint:");
     mac.update(plaintext.as_bytes());
     hex::encode(mac.finalize().into_bytes())
@@ -132,10 +155,14 @@ pub fn fingerprint_key(secret: &str, plaintext: &str) -> String {
 /// Hash a plaintext key with argon2id (OWASP baseline parameters) and a
 /// fresh random salt. Returns the PHC string.
 pub fn hash_key_slow(plaintext: &str) -> String {
-    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = argon2::Argon2::default();
-    argon2
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use rand::RngCore;
+    let mut salt_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let Ok(salt) = SaltString::encode_b64(&salt_bytes) else {
+        return String::new();
+    };
+    argon2::Argon2::default()
         .hash_password(plaintext.as_bytes(), &salt)
         .map(|h| h.to_string())
         .unwrap_or_else(|_| String::new())
@@ -356,6 +383,27 @@ impl KeyAuth {
             role: key.role,
             is_master: key.is_master,
         })
+    }
+
+    /// Mark the entry matching the master plaintext as the protected master
+    /// key (A2): admin role, is_master, never deletable/modifiable. Used at
+    /// startup when the master key already exists in a legacy keys.json.
+    pub fn mark_master(&self, plaintext: &str) {
+        let fp = fingerprint_key(&self.secret, plaintext);
+        let legacy_fp = format!("sha256:{}", hash_key(plaintext));
+        let mut guard = match self.keys.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("auth keys lock poisoned (write), mark_master dropped");
+                return;
+            }
+        };
+        for fp in [fp, legacy_fp] {
+            if let Some(entry) = guard.get_mut(&fp) {
+                entry.is_master = true;
+                entry.role = KeyRole::Admin;
+            }
+        }
     }
 
     /// Legacy boolean admin check kept for the startup master-key probe.

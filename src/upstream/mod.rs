@@ -397,11 +397,13 @@ impl CodeArtsClient {
             .map_err(|_| GatewayError::bad_gateway("upstream timeout after 30s"))?
             .transpose()
             .map_err(|e| classify_upstream(None, &e.to_string()))?;
-        let first_stream = match first {
-            Some(chunk) => futures_util::stream::iter(vec![Ok(chunk)]).chain(stream),
-            None => stream,
+        let first_stream: ByteStream = match first {
+            Some(chunk) => Box::pin(
+                futures_util::stream::iter(vec![Ok::<Bytes, reqwest::Error>(chunk)]).chain(stream),
+            ),
+            None => Box::pin(stream),
         };
-        Ok(Box::pin(first_stream))
+        Ok(first_stream)
     }
 
     /// Signed POST to a chat-API path with the MaaS session headers.

@@ -139,6 +139,8 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(KeyAuth::new(&cli.secret, vec![cli.gw_key.clone()]))
     } else {
         let ka = KeyAuth::from_entries(&cli.secret, persisted);
+        // A2: 主密钥若已存在于旧 keys.json，标记为不可删改的 admin 条目。
+        ka.mark_master(&cli.gw_key);
         // Ensure the master key still works even if not in the file.
         if !ka.authenticate(&cli.gw_key) {
             ka.upsert(crate::auth::ApiKey {
