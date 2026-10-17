@@ -50,6 +50,14 @@ export interface GatewayInfo {
   default_model: string;
   sticky_sessions: number;
   api_keys: number;
+  admin_keys: number;
+  user_keys: number;
+  /** A3: 上游连接建立超时（秒） */
+  upstream_connect_timeout_secs: number;
+  /** A3: 流式首字节超时（秒），首帧后不受限 */
+  stream_first_byte_timeout_secs: number;
+  /** A3: 非流式整体超时（秒） */
+  non_stream_timeout_secs: number;
   upstream: string;
 }
 
@@ -69,6 +77,12 @@ export interface ApiKeyInfo {
   model_allowlist: string[];
   enabled: boolean;
   expired: boolean;
+  /** A2: admin 或 user；旧数据缺省读作 admin */
+  role: "admin" | "user";
+  /** A2: 主密钥不可删改 */
+  is_master: boolean;
+  /** A2: 仍为旧 SHA-256 摘要时提示轮换 */
+  legacy_hash: boolean;
 }
 
 export interface StatsResponse {
@@ -175,6 +189,8 @@ export const api = {
     expires_at?: string | null;
     token_quota?: number;
     model_allowlist?: string[];
+    /** A2: 缺省 user，需显式传 admin 才创建管理密钥 */
+    role?: "admin" | "user";
   }) =>
     request<ApiKeyInfo>("/keys", {
       method: "POST",
@@ -182,7 +198,12 @@ export const api = {
     }),
   patchKey: (
     name: string,
-    payload: { enabled?: boolean; token_quota?: number; expires_at?: string | null }
+    payload: {
+      enabled?: boolean;
+      token_quota?: number;
+      expires_at?: string | null;
+      role?: "admin" | "user";
+    }
   ) =>
     request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}`, {
       method: "PATCH",

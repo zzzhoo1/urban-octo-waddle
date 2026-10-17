@@ -68,18 +68,25 @@ impl Gateway {
                 AuthFailure::ModelNotAllowed => {
                     GatewayError::unauthorized("model not allowed for this key")
                 }
+                AuthFailure::Forbidden => {
+                    GatewayError::unauthorized("admin privilege required")
+                        .with_status(axum::http::StatusCode::FORBIDDEN)
+                }
             })?;
+        // A2: 旧 SHA-256 条目在成功鉴权后惰性升级为 argon2id，失败不影响请求。
+        self.keys.lazy_upgrade(api_key);
         let resolved = self.router.resolve(model, "", is_background);
         Ok(RequestContext {
             key_name: identity.key_name,
-            key_hash: KeyAuth::hash_of(api_key),
+            // 记账索引与密钥表一致，使用确定性指纹而非明文摘要。
+            key_hash: self.keys.fingerprint_of(api_key),
             resolved,
         })
     }
 
     /// Record token usage against a key after a completed request.
-    pub fn record_usage(&self, key_hash: &str, tokens: u64) {
-        self.keys.record_usage(key_hash, tokens);
+    pub fn record_usage(&self, fingerprint: &str, tokens: u64) {
+        self.keys.record_usage(fingerprint, tokens);
     }
 
     fn retry_delay(&self, attempt: u32) -> Duration {

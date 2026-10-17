@@ -143,6 +143,14 @@ async fn handle_chat(
         Err(e) => return e.into_response(),
     };
 
+    // A2: 若本次鉴权触发了旧摘要的惰性升级，立即把新 argon2id 摘要
+    // 落盘 keys.json；落盘失败仅记 ERROR，下次请求重试升级。
+    if !state.keys.take_dirty().is_empty() {
+        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+            tracing::error!("failed to persist upgraded key hashes: {}", e);
+        }
+    }
+
     // Rewrite the request to the resolved upstream model, keeping the
     // client-visible model name for the response/logs.
     let mut upstream_req = req.clone();

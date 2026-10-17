@@ -40,6 +40,21 @@ function keyStatusBadge(k: ApiKeyInfo) {
   return <Badge variant="success">生效中</Badge>;
 }
 
+/** A2: 角色徽章；主密钥附加标记 */
+function roleBadge(k: ApiKeyInfo) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {k.role === "admin" ? (
+        <Badge variant="default">admin</Badge>
+      ) : (
+        <Badge variant="outline">user</Badge>
+      )}
+      {k.is_master ? <Badge variant="secondary">主密钥</Badge> : null}
+      {k.legacy_hash ? <Badge variant="warning">待轮换</Badge> : null}
+    </span>
+  );
+}
+
 function quotaText(k: ApiKeyInfo): string {
   if (k.token_quota === 0) return `${k.tokens_used.toLocaleString()} / 不限`;
   const pct = Math.min(100, Math.round((k.tokens_used / k.token_quota) * 100));
@@ -67,6 +82,10 @@ function KeyCard({
         <span className="font-mono text-xs">{k.hint}</span>
       </div>
       <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">角色</span>
+        <span className="text-xs">{roleBadge(k)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
         <span className="text-xs text-[var(--muted-foreground)]">用量/配额</span>
         <span className="text-xs">{quotaText(k)}</span>
       </div>
@@ -82,12 +101,18 @@ function KeyCard({
       </div>
       <div className="flex items-center justify-between pt-1">
         <div className="flex items-center gap-2">
-          <Switch checked={k.enabled} onCheckedChange={(c) => onToggle(k, c)} />
+          <Switch
+            checked={k.enabled}
+            disabled={k.is_master}
+            onCheckedChange={(c) => onToggle(k, c)}
+          />
           <span className="text-xs text-[var(--muted-foreground)]">{k.enabled ? "已启用" : "已禁用"}</span>
         </div>
-        <Button variant="ghost" size="icon" onClick={() => onDelete(k)}>
-          <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
-        </Button>
+        {k.is_master ? null : (
+          <Button variant="ghost" size="icon" onClick={() => onDelete(k)}>
+            <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -102,6 +127,7 @@ export default function KeysPage() {
   const [expiresAt, setExpiresAt] = useState("");
   const [quota, setQuota] = useState("");
   const [allowlist, setAllowlist] = useState("");
+  const [asAdmin, setAsAdmin] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ApiKeyInfo | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -146,6 +172,7 @@ export default function KeysPage() {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        role: asAdmin ? "admin" : "user",
       });
       toast.success(`密钥『${name.trim()}』已创建，请立即复制保存完整密钥`);
       setAddOpen(false);
@@ -154,6 +181,7 @@ export default function KeysPage() {
       setExpiresAt("");
       setQuota("");
       setAllowlist("");
+      setAsAdmin(false);
       await load();
     } catch (err) {
       toast.error(`创建失败：${err instanceof Error ? err.message : "未知错误"}`);
@@ -232,6 +260,7 @@ export default function KeysPage() {
                     <TableRow>
                       <TableHead>名称</TableHead>
                       <TableHead>密钥</TableHead>
+                      <TableHead>角色</TableHead>
                       <TableHead>状态</TableHead>
                       <TableHead>用量 / 配额</TableHead>
                       <TableHead>模型白名单</TableHead>
@@ -247,6 +276,7 @@ export default function KeysPage() {
                         <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
                           {k.hint}
                         </TableCell>
+                        <TableCell>{roleBadge(k)}</TableCell>
                         <TableCell>{keyStatusBadge(k)}</TableCell>
                         <TableCell className="text-sm">{quotaText(k)}</TableCell>
                         <TableCell className="text-xs text-[var(--muted-foreground)]">
@@ -260,17 +290,20 @@ export default function KeysPage() {
                         <TableCell>
                           <Switch
                             checked={k.enabled}
+                            disabled={k.is_master}
                             onCheckedChange={(checked) => toggle(k, checked)}
                           />
                         </TableCell>
                         <TableCell className="text-right">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => setDeleteTarget(k)}
-                          >
-                            <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
-                          </Button>
+                          {k.is_master ? null : (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => setDeleteTarget(k)}
+                            >
+                              <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+                            </Button>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -353,6 +386,19 @@ export default function KeysPage() {
                 value={allowlist}
                 onChange={(e) => setAllowlist(e.target.value)}
               />
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-[var(--border)] p-3">
+              <Switch
+                id="key-admin"
+                checked={asAdmin}
+                onCheckedChange={setAsAdmin}
+              />
+              <div className="leading-tight">
+                <Label htmlFor="key-admin" className="cursor-pointer">管理员角色（admin）</Label>
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  默认创建 user 角色密钥，仅可调用 /v1 数据面；勾选后可访问管理面
+                </p>
+              </div>
             </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>

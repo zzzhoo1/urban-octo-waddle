@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use serde_json::json;
 
 use crate::error::{classify_upstream, GatewayError};
@@ -138,8 +138,10 @@ impl CodeArtsClient {
         } else {
             format!("{}{}", gateway, API_PREFIX)
         };
+        // A3: 连接建立超时 10 秒；不设整体超时（SSE 长连接可能持续
+        // 数分钟），非流式与流式首帧超时由调用侧分别施加。
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("reqwest client build");
         Self {
@@ -331,13 +333,20 @@ impl CodeArtsClient {
             .map_err(|e| GatewayError::internal(format!("encode chat body: {}", e)))
     }
 
-    /// Non-streaming chat completion.
+    /// Non-streaming chat completion with a 120s overall timeout (A3).
     pub async fn chat_completion(
         &self,
         req: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let body = self.build_chat_body(req)?;
-        let data = self.post_signed(PATH_CHAT_COMPLETIONS, &body).await?;
+        let data = tokio::time::timeout(
+            Duration::from_secs(120),
+            self.post_signed(PATH_CHAT_COMPLETIONS, &body),
+        )
+        .await
+        .map_err(|_| {
+            GatewayError::bad_gateway("upstream timeout after 120s")
+        })??;
         parse_chat_response(&data, &req.model)
     }
 
@@ -380,7 +389,19 @@ impl CodeArtsClient {
                 &String::from_utf8_lossy(&data[..data.len().min(500)]),
             ));
         }
-        Ok(Box::pin(resp.bytes_stream()))
+        // A3: 流式首字节超时——收到响应头到第一个 SSE 数据帧最多 30 秒；
+        // 首帧到达后不再受该超时约束（长回答可能持续数分钟）。
+        let mut stream = resp.bytes_stream();
+        let first = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .map_err(|_| GatewayError::bad_gateway("upstream timeout after 30s"))?
+            .transpose()
+            .map_err(|e| classify_upstream(None, &e.to_string()))?;
+        let first_stream = match first {
+            Some(chunk) => futures_util::stream::iter(vec![Ok(chunk)]).chain(stream),
+            None => stream,
+        };
+        Ok(Box::pin(first_stream))
     }
 
     /// Signed POST to a chat-API path with the MaaS session headers.

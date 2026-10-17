@@ -152,31 +152,58 @@ impl RequestLog {
     }
 
     pub fn record(&self, entry: RequestLogEntry) {
-        let mut guard = self.entries.write().expect("log lock poisoned");
-        if guard.len() >= self.capacity {
-            guard.pop_front();
+        match self.entries.write() {
+            Ok(mut guard) => {
+                if guard.len() >= self.capacity {
+                    guard.pop_front();
+                }
+                guard.push_back(entry);
+            }
+            Err(_) => {
+                tracing::error!("request log lock poisoned (write), entry dropped");
+            }
         }
-        guard.push_back(entry);
     }
 
     /// Newest first.
     pub fn list(&self) -> Vec<RequestLogEntry> {
-        self.entries
-            .read()
-            .expect("log lock poisoned")
-            .iter()
-            .rev()
-            .cloned()
-            .collect()
+        match self.entries.read() {
+            Ok(g) => g.iter().rev().cloned().collect(),
+            Err(_) => {
+                tracing::error!("request log lock poisoned (read)");
+                Vec::new()
+            }
+        }
     }
 
     pub fn size(&self) -> usize {
-        self.entries.read().expect("log lock poisoned").len()
+        match self.entries.read() {
+            Ok(g) => g.len(),
+            Err(_) => 0,
+        }
     }
 
     /// Aggregate stats over all retained entries.
     pub fn stats(&self) -> StatsResponse {
-        let guard = self.entries.read().expect("log lock poisoned");
+        let guard = match self.entries.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("request log lock poisoned (read)");
+                return StatsResponse {
+                    totals: StatsTotals {
+                        requests: 0,
+                        errors: 0,
+                        success_rate: 1.0,
+                        total_tokens: 0,
+                        avg_latency_ms: 0,
+                        avg_ttft_ms: 0,
+                    },
+                    by_day: Vec::new(),
+                    by_model: Vec::new(),
+                    by_key: Vec::new(),
+                };
+            }
+        };
         let mut totals = StatsBucket::default();
         let mut by_day: BTreeMap<String, StatsBucket> = BTreeMap::new();
         let mut by_model: BTreeMap<String, StatsBucket> = BTreeMap::new();

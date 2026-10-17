@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::account::{Account, AccountData, AccountStatus};
-use crate::auth::{hash_key, mask_key, ApiKey};
+use crate::auth::{fingerprint_key, hash_key_slow, mask_key, ApiKey, AuthFailure, KeyRole};
 use crate::error::GatewayError;
 use crate::router::{DowngradeRule, RouteRule};
 use crate::AppState;
@@ -61,15 +61,66 @@ async fn admin_auth(
             }
         }
     }
-    if !state.keys.authenticate(&token) {
-        return (
+    // A2 鉴权分级：无效/过期/禁用密钥返回 401；有效但非 admin 角色的
+    // 密钥返回 403 + unauthorized 信封，面板据此区分『未登录』与『权限不足』。
+    match state.keys.authenticate_admin(&token) {
+        Ok(identity) => {
+            let mut req = req;
+            req.extensions_mut().insert(identity);
+            next.run(req).await
+        }
+        Err(AuthFailure::Forbidden) => GatewayError::unauthorized("admin privilege required")
+            .with_status(StatusCode::FORBIDDEN)
+            .into_response(),
+        Err(_) => (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Bearer")],
             "unauthorized",
         )
-            .into_response();
+            .into_response(),
     }
-    next.run(req).await
+}
+
+/// Admin-plane actor extracted from request extensions (inserted by the
+/// auth middleware). Used for A2 write-operation audit logging; never
+/// carries key plaintext or credentials.
+#[derive(Debug, Clone, Default)]
+struct AdminActor {
+    key_name: String,
+    source_ip: String,
+}
+
+impl AdminActor {
+    fn audit(&self, action: &str, target: &str) {
+        tracing::info!(
+            actor_key_name = %self.key_name,
+            action = %action,
+            target = %target,
+            source_ip = %self.source_ip,
+            "admin write"
+        );
+    }
+}
+
+impl axum::extract::FromRequestParts<Arc<AppState>> for AdminActor {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let key_name = parts
+            .extensions
+            .get::<crate::auth::AuthIdentity>()
+            .map(|i| i.key_name.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let source_ip = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(AdminActor { key_name, source_ip })
+    }
 }
 
 /// Account DTO returned to the panel (credential never leaves the server).
@@ -107,6 +158,7 @@ struct CreateAccountReq {
 
 async fn create_account(
     State(state): State<Arc<AppState>>,
+    actor: AdminActor,
     Json(req): Json<CreateAccountReq>,
 ) -> Response {
     if req.name.is_empty() || req.credential.is_empty() {
@@ -117,10 +169,11 @@ async fn create_account(
         Err(e) => return GatewayError::internal(format!("encrypt failed: {}", e)).into_response(),
     };
     let id = format!("acc-{}", chrono::Utc::now().format("%Y%m%d%H%M%S%.6f"));
-    let account = Account::new(id, req.name, enc);
+    let account = Account::new(id, req.name.clone(), enc);
     let dto = to_dto(&account.data());
     state.pool.add(account);
     persist(&state);
+    actor.audit("create_account", &req.name);
     (StatusCode::CREATED, Json(dto)).into_response()
 }
 
@@ -131,6 +184,7 @@ struct PatchAccountReq {
 
 async fn patch_account(
     State(state): State<Arc<AppState>>,
+    actor: AdminActor,
     Path(id): Path<String>,
     Json(req): Json<PatchAccountReq>,
 ) -> Response {
@@ -143,14 +197,20 @@ async fn patch_account(
         _ => return GatewayError::bad_request("invalid status").into_response(),
     }
     persist(&state);
+    actor.audit("patch_account", &id);
     Json(to_dto(&account.data())).into_response()
 }
 
-async fn delete_account(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+async fn delete_account(
+    State(state): State<Arc<AppState>>,
+    actor: AdminActor,
+    Path(id): Path<String>,
+) -> Response {
     if !state.pool.remove(&id) {
         return GatewayError::bad_request("account not found").into_response();
     }
     persist(&state);
+    actor.audit("delete_account", &id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -203,6 +263,14 @@ struct InfoDto {
     default_model: String,
     sticky_sessions: usize,
     api_keys: usize,
+    admin_keys: usize,
+    user_keys: usize,
+    /// A3: 上游连接建立超时（秒）。
+    upstream_connect_timeout_secs: u64,
+    /// A3: 流式首字节超时（秒），首帧后不受限。
+    stream_first_byte_timeout_secs: u64,
+    /// A3: 非流式整体超时（秒）。
+    non_stream_timeout_secs: u64,
     upstream: String,
 }
 
@@ -221,6 +289,11 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         default_model: state.cfg.default_model.clone(),
         sticky_sessions: state.gateway.session_size(),
         api_keys: state.keys.count(),
+        admin_keys: state.keys.count_by_role(KeyRole::Admin),
+        user_keys: state.keys.count_by_role(KeyRole::User),
+        upstream_connect_timeout_secs: 10,
+        stream_first_byte_timeout_secs: 30,
+        non_stream_timeout_secs: 120,
         upstream: crate::upstream::CODEARTS_GATEWAY_PROD.to_string(),
     })
 }
@@ -238,6 +311,12 @@ struct KeyDto {
     model_allowlist: Vec<String>,
     enabled: bool,
     expired: bool,
+    /// A2: admin 或 user；旧数据缺省读作 admin。
+    role: String,
+    /// A2: 命令行注入的主密钥，为真时不可删改。
+    is_master: bool,
+    /// A2: 仍为无盐 SHA-256 摘要时为真，面板提示轮换。
+    legacy_hash: bool,
 }
 
 fn key_dto(k: &ApiKey) -> KeyDto {
@@ -251,6 +330,9 @@ fn key_dto(k: &ApiKey) -> KeyDto {
         model_allowlist: k.model_allowlist.clone(),
         enabled: k.enabled,
         expired: k.is_expired(chrono::Utc::now()),
+        role: k.role.as_str().to_string(),
+        is_master: k.is_master,
+        legacy_hash: k.legacy_hash,
     }
 }
 
@@ -270,10 +352,14 @@ struct CreateKeyReq {
     token_quota: u64,
     #[serde(default)]
     model_allowlist: Vec<String>,
+    /// A2: 新建密钥默认 user 角色，需显式传 admin 才创建管理密钥。
+    #[serde(default)]
+    role: Option<String>,
 }
 
 async fn create_key(
     State(state): State<Arc<AppState>>,
+    actor: AdminActor,
     Json(req): Json<CreateKeyReq>,
 ) -> Response {
     if req.name.is_empty() || req.key.is_empty() {
@@ -282,9 +368,19 @@ async fn create_key(
     if state.keys.get_by_name(&req.name).is_some() {
         return GatewayError::bad_request("key name already exists").into_response();
     }
+    // A2: 未知角色取值按 user 处理并记录 WARN。
+    let role = match req.role.as_deref() {
+        None | Some("") | Some("user") => KeyRole::User,
+        Some("admin") => KeyRole::Admin,
+        Some(other) => {
+            tracing::warn!(role = %other, "unknown key role, treated as user");
+            KeyRole::User
+        }
+    };
     let entry = ApiKey {
-        name: req.name,
-        key_hash: hash_key(&req.key),
+        name: req.name.clone(),
+        key_hash: hash_key_slow(&req.key),
+        fingerprint: fingerprint_key(&state.secret, &req.key),
         hint: mask_key(&req.key),
         created_at: Some(chrono::Utc::now()),
         expires_at: req.expires_at,
@@ -292,10 +388,14 @@ async fn create_key(
         tokens_used: 0,
         model_allowlist: req.model_allowlist,
         enabled: true,
+        role,
+        is_master: false,
+        legacy_hash: false,
     };
     let dto = key_dto(&entry);
     state.keys.upsert(entry);
     persist_keys(&state);
+    actor.audit("create_key", &dto.name);
     (StatusCode::CREATED, Json(dto)).into_response()
 }
 
@@ -307,16 +407,24 @@ struct PatchKeyReq {
     token_quota: Option<u64>,
     #[serde(default)]
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// A2: 可选角色变更；主密钥任何修改均拒绝。
+    #[serde(default)]
+    role: Option<String>,
 }
 
 async fn patch_key(
     State(state): State<Arc<AppState>>,
+    actor: AdminActor,
     Path(name): Path<String>,
     Json(req): Json<PatchKeyReq>,
 ) -> Response {
     let Some(mut key) = state.keys.get_by_name(&name) else {
         return GatewayError::bad_request("key not found").into_response();
     };
+    // A2: 主密钥不可通过面板降级或修改。
+    if key.is_master {
+        return GatewayError::bad_request("master key cannot be modified").into_response();
+    }
     if let Some(e) = req.enabled {
         key.enabled = e;
     }
@@ -326,17 +434,39 @@ async fn patch_key(
     if req.expires_at.is_some() {
         key.expires_at = req.expires_at;
     }
+    if let Some(r) = req.role.as_deref() {
+        match r {
+            "admin" => key.role = KeyRole::Admin,
+            "user" => key.role = KeyRole::User,
+            other => {
+                tracing::warn!(role = %other, "unknown key role, treated as user");
+                key.role = KeyRole::User;
+            }
+        }
+    }
     let dto = key_dto(&key);
     state.keys.upsert(key);
     persist_keys(&state);
+    actor.audit("patch_key", &name);
     Json(dto).into_response()
 }
 
-async fn delete_key(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+async fn delete_key(
+    State(state): State<Arc<AppState>>,
+    actor: AdminActor,
+    Path(name): Path<String>,
+) -> Response {
+    // A2: 主密钥不可删除。
+    if let Some(key) = state.keys.get_by_name(&name) {
+        if key.is_master {
+            return GatewayError::bad_request("master key cannot be modified").into_response();
+        }
+    }
     if !state.keys.remove_by_name(&name) {
         return GatewayError::bad_request("key not found").into_response();
     }
     persist_keys(&state);
+    actor.audit("delete_key", &name);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -356,6 +486,7 @@ struct PutRouterReq {
 
 async fn put_router(
     State(state): State<Arc<AppState>>,
+    actor: AdminActor,
     Json(req): Json<PutRouterReq>,
 ) -> Response {
     // Validate: alias and pattern are mutually exclusive per rule.
@@ -374,11 +505,13 @@ async fn put_router(
             return GatewayError::bad_request("each rule needs a target model").into_response();
         }
     }
+    let rule_count = req.rules.len();
     state.router.replace(crate::router::RouterConfig {
         rules: req.rules,
         downgrade: req.downgrade,
     });
     persist_router(&state);
+    actor.audit("put_router", &format!("{} rules", rule_count));
     Json(state.router.config()).into_response()
 }
 

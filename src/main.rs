@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use axum::{response::Redirect, routing::get, Router};
 use clap::Parser;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::CompressionLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::account::Pool;
@@ -94,6 +96,8 @@ pub struct AppState {
     pub cfg: GatewayConfig,
     pub listen: String,
     pub router: Arc<ModelRouter>,
+    /// Server secret, used to derive key lookup fingerprints (A2).
+    pub secret: String,
 }
 
 #[tokio::main]
@@ -132,14 +136,15 @@ async fn main() -> anyhow::Result<()> {
     // existing single-key deployments keep working without migration.
     let persisted = store.load_keys().unwrap_or_default();
     let keys = if persisted.is_empty() {
-        Arc::new(KeyAuth::new(vec![cli.gw_key.clone()]))
+        Arc::new(KeyAuth::new(&cli.secret, vec![cli.gw_key.clone()]))
     } else {
-        let ka = KeyAuth::from_entries(persisted);
+        let ka = KeyAuth::from_entries(&cli.secret, persisted);
         // Ensure the master key still works even if not in the file.
         if !ka.authenticate(&cli.gw_key) {
             ka.upsert(crate::auth::ApiKey {
                 name: "master".to_string(),
-                key_hash: crate::auth::hash_key(&cli.gw_key),
+                key_hash: crate::auth::hash_key_slow(&cli.gw_key),
+                fingerprint: crate::auth::fingerprint_key(&cli.secret, &cli.gw_key),
                 hint: crate::auth::mask_key(&cli.gw_key),
                 created_at: Some(chrono::Utc::now()),
                 expires_at: None,
@@ -147,6 +152,9 @@ async fn main() -> anyhow::Result<()> {
                 tokens_used: 0,
                 model_allowlist: Vec::new(),
                 enabled: true,
+                role: crate::auth::KeyRole::Admin,
+                is_master: true,
+                legacy_hash: false,
             });
         }
         Arc::new(ka)
@@ -181,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         listen: cli.listen.clone(),
         router,
+        secret: cli.secret.clone(),
     });
 
     let app = Router::new()
@@ -190,6 +199,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin", get(|| async { Redirect::temporary("/admin/") }))
         .route("/admin/", get(statics::admin_index))
         .route("/admin/{*path}", get(statics::admin_static))
+        // A1: 最外层 panic 捕获——单请求 panic 返回统一错误信封，进程存活。
+        .layer(CatchPanicLayer::custom(error::panic_response))
+        // A3: 响应压缩仅作用非 SSE 内容（SSE 的 Content-Type 不在压缩列表内）。
+        .layer(CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let bind = normalize_listen(&cli.listen);

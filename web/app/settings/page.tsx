@@ -51,7 +51,10 @@ export default function SettingsPage() {
         ["最大重试", `${info.retry_max} 次（线性退避 ${info.retry_backoff_ms}ms 起）`],
         ["会话粘性", `TTL ${info.session_ttl_secs / 60} 分钟，容量 ${info.session_max_size}`],
         ["当前粘性会话", `${info.sticky_sessions} 个`],
-        ["API 密钥", `${info.api_keys} 把`],
+        ["API 密钥", `${info.api_keys} 把（admin ${info.admin_keys} / user ${info.user_keys}）`],
+        ["上游连接超时", `${info.upstream_connect_timeout_secs} 秒`],
+        ["流式首字节超时", `${info.stream_first_byte_timeout_secs} 秒（首帧后不受限）`],
+        ["非流式整体超时", `${info.non_stream_timeout_secs} 秒`],
       ]
     : [];
 

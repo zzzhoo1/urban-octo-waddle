@@ -45,6 +45,8 @@ impl ErrorKind {
 pub struct GatewayError {
     pub kind: ErrorKind,
     pub message: String,
+    /// Optional status override (A2: 403 for authenticated non-admin keys).
+    pub status_override: Option<StatusCode>,
 }
 
 impl GatewayError {
@@ -52,7 +54,14 @@ impl GatewayError {
         Self {
             kind,
             message: message.into(),
+            status_override: None,
         }
+    }
+
+    /// Override the HTTP status while keeping the error envelope format.
+    pub fn with_status(mut self, status: StatusCode) -> Self {
+        self.status_override = Some(status);
+        self
     }
 
     pub fn unauthorized(msg: impl Into<String>) -> Self {
@@ -90,7 +99,7 @@ impl std::error::Error for GatewayError {}
 
 impl IntoResponse for GatewayError {
     fn into_response(self) -> Response {
-        let status = self.kind.status();
+        let status = self.status_override.unwrap_or_else(|| self.kind.status());
         let body = json!({
             "error": {
                 "message": self.message,
@@ -100,6 +109,29 @@ impl IntoResponse for GatewayError {
         });
         (status, Json(body)).into_response()
     }
+}
+
+/// A1: panic 捕获层的统一响应。message 固定，不回显 panic 文本、源码路径或行号。
+pub fn panic_response(_panic: Box<dyn std::any::Any + Send>) -> Response {
+    // 尽力从请求上下文取信息；CatchPanicLayer 不提供 path/method，
+    // 由 TraceLayer 的 ERROR 行补充路径信息。
+    let trace_id = format!("{:016x}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() & 0xffffffff))
+        .unwrap_or(0));
+    tracing::error!(
+        trace_id = %trace_id,
+        panic_message = "request handler panicked",
+        "handler panic caught"
+    );
+    let body = json!({
+        "error": {
+            "message": "internal gateway error",
+            "type": "internal",
+            "code": "internal",
+        }
+    });
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
 }
 
 /// Classify an upstream error into a gateway error kind.

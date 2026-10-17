@@ -38,13 +38,26 @@ impl JsonFileStore {
     }
 
     pub fn save(&self, accounts: &[AccountData]) -> anyhow::Result<()> {
-        let _guard = self.mu.lock().expect("store lock poisoned");
+        let _guard = match self.mu.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                // A1: 持久化写路径锁中毒：放弃本次写入，不影响请求
+                tracing::error!("account store lock poisoned (write), save skipped");
+                return Ok(());
+            }
+        };
         let data = serde_json::to_vec_pretty(accounts)?;
         self.atomic_write(&self.path.clone(), &data)
     }
 
     pub fn load(&self) -> anyhow::Result<Vec<AccountData>> {
-        let _guard = self.mu.lock().expect("store lock poisoned");
+        let _guard = match self.mu.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("account store lock poisoned (read)");
+                return Ok(Vec::new());
+            }
+        };
         match std::fs::read(&self.path) {
             Ok(data) => Ok(serde_json::from_slice(&data)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

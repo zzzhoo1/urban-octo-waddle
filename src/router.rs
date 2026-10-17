@@ -110,11 +110,22 @@ impl ModelRouter {
     }
 
     pub fn config(&self) -> RouterConfig {
-        self.cfg.read().expect("router lock poisoned").clone()
+        match self.cfg.read() {
+            Ok(g) => g.clone(),
+            Err(_) => {
+                tracing::error!("router config lock poisoned (read)");
+                RouterConfig::default()
+            }
+        }
     }
 
     pub fn replace(&self, cfg: RouterConfig) {
-        *self.cfg.write().expect("router lock poisoned") = cfg;
+        match self.cfg.write() {
+            Ok(mut g) => *g = cfg,
+            Err(_) => {
+                tracing::error!("router config lock poisoned (write), replace dropped");
+            }
+        }
     }
 
     /// Resolve a requested model + effort into (target model, effort).
@@ -124,7 +135,17 @@ impl ModelRouter {
     ///   the request is silently rerouted to the cheap target.
     /// - Otherwise built-in tiers, then passthrough.
     pub fn resolve(&self, model: &str, effort: &str, is_background: bool) -> Resolved {
-        let cfg = self.cfg.read().expect("router lock poisoned");
+        let cfg = match self.cfg.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("router config lock poisoned (read), passthrough");
+                return Resolved {
+                    model: model.to_string(),
+                    effort: effort.to_string(),
+                    via: ResolutionLayer::Passthrough,
+                };
+            }
+        };
 
         // 1. User rules: exact alias first, then regex.
         for rule in &cfg.rules {
@@ -193,7 +214,13 @@ impl ModelRouter {
 
     /// Public model ids exposed via /v1/models: user aliases + builtin tiers.
     pub fn advertised_aliases(&self) -> Vec<(String, String)> {
-        let cfg = self.cfg.read().expect("router lock poisoned");
+        let cfg = match self.cfg.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("router config lock poisoned (read)");
+                return Vec::new();
+            }
+        };
         cfg.rules
             .iter()
             .filter(|r| !r.alias.is_empty())

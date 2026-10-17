@@ -78,26 +78,61 @@ impl Account {
     }
 
     pub fn data(&self) -> AccountData {
-        self.inner.read().expect("account lock poisoned").clone()
+        match self.inner.read() {
+            Ok(g) => g.clone(),
+            Err(_) => {
+                tracing::error!("account lock poisoned (read)");
+                AccountData {
+                    id: String::new(),
+                    name: String::new(),
+                    credential: String::new(),
+                    status: AccountStatus::Disabled,
+                    failure_count: 0,
+                    last_failure_at: None,
+                    created_at: Utc::now(),
+                }
+            }
+        }
     }
 
     pub fn id(&self) -> String {
-        self.inner.read().expect("account lock poisoned").id.clone()
+        match self.inner.read() {
+            Ok(g) => g.id.clone(),
+            Err(_) => {
+                tracing::error!("account lock poisoned (read)");
+                String::new()
+            }
+        }
     }
 
     pub fn name(&self) -> String {
-        self.inner.read().expect("account lock poisoned").name.clone()
+        match self.inner.read() {
+            Ok(g) => g.name.clone(),
+            Err(_) => {
+                tracing::error!("account lock poisoned (read)");
+                String::new()
+            }
+        }
     }
 
     pub fn status(&self) -> AccountStatus {
-        self.inner.read().expect("account lock poisoned").status
+        match self.inner.read() {
+            Ok(g) => g.status,
+            Err(_) => {
+                tracing::error!("account lock poisoned (read)");
+                AccountStatus::Disabled
+            }
+        }
     }
 
     pub fn failure_count(&self) -> u32 {
-        self.inner
-            .read()
-            .expect("account lock poisoned")
-            .failure_count
+        match self.inner.read() {
+            Ok(g) => g.failure_count,
+            Err(_) => {
+                tracing::error!("account lock poisoned (read)");
+                0
+            }
+        }
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -105,19 +140,37 @@ impl Account {
     }
 
     pub fn enable(&self) {
-        let mut guard = self.inner.write().expect("account lock poisoned");
-        guard.status = AccountStatus::Active;
-        guard.failure_count = 0;
+        match self.inner.write() {
+            Ok(mut guard) => {
+                guard.status = AccountStatus::Active;
+                guard.failure_count = 0;
+            }
+            Err(_) => {
+                tracing::error!("account lock poisoned (write), enable dropped");
+            }
+        }
     }
 
     pub fn disable(&self) {
-        let mut guard = self.inner.write().expect("account lock poisoned");
-        guard.status = AccountStatus::Disabled;
+        match self.inner.write() {
+            Ok(mut guard) => {
+                guard.status = AccountStatus::Disabled;
+            }
+            Err(_) => {
+                tracing::error!("account lock poisoned (write), disable dropped");
+            }
+        }
     }
 
     /// Record a failure. Returns true when the account transitions to cooling.
     pub fn mark_failure(&self, now: DateTime<Utc>, threshold: u32) -> bool {
-        let mut guard = self.inner.write().expect("account lock poisoned");
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("account lock poisoned (write), mark_failure dropped");
+                return false;
+            }
+        };
         guard.failure_count = guard.failure_count.saturating_add(1);
         guard.last_failure_at = Some(now);
         if threshold == 0 || guard.failure_count >= threshold {
@@ -130,8 +183,14 @@ impl Account {
     }
 
     pub fn reset_failures(&self) {
-        let mut guard = self.inner.write().expect("account lock poisoned");
-        guard.failure_count = 0;
+        match self.inner.write() {
+            Ok(mut guard) => {
+                guard.failure_count = 0;
+            }
+            Err(_) => {
+                tracing::error!("account lock poisoned (write), reset dropped");
+            }
+        }
     }
 
     /// Recover a cooling account once the cooldown elapsed.
@@ -139,7 +198,13 @@ impl Account {
         if recover_after.is_zero() {
             return false;
         }
-        let mut guard = self.inner.write().expect("account lock poisoned");
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("account lock poisoned (write), recover dropped");
+                return false;
+            }
+        };
         if guard.status != AccountStatus::Cooling {
             return false;
         }
@@ -175,10 +240,12 @@ impl Pool {
     }
 
     pub fn add(&self, account: Account) {
-        self.accounts
-            .write()
-            .expect("pool lock poisoned")
-            .push(Arc::new(account));
+        match self.accounts.write() {
+            Ok(mut guard) => guard.push(Arc::new(account)),
+            Err(_) => {
+                tracing::error!("pool lock poisoned (write), account add dropped");
+            }
+        }
     }
 
     pub fn add_data(&self, data: AccountData) {
@@ -186,7 +253,13 @@ impl Pool {
     }
 
     pub fn list(&self) -> Vec<Arc<Account>> {
-        self.accounts.read().expect("pool lock poisoned").clone()
+        match self.accounts.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                tracing::error!("pool lock poisoned (read)");
+                Vec::new()
+            }
+        }
     }
 
     pub fn list_data(&self) -> Vec<AccountData> {
@@ -194,16 +267,23 @@ impl Pool {
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Account>> {
-        self.accounts
-            .read()
-            .expect("pool lock poisoned")
-            .iter()
-            .find(|account| account.id() == id)
-            .cloned()
+        match self.accounts.read() {
+            Ok(guard) => guard.iter().find(|account| account.id() == id).cloned(),
+            Err(_) => {
+                tracing::error!("pool lock poisoned (read)");
+                None
+            }
+        }
     }
 
     pub fn remove(&self, id: &str) -> bool {
-        let mut guard = self.accounts.write().expect("pool lock poisoned");
+        let mut guard = match self.accounts.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("pool lock poisoned (write), remove dropped");
+                return false;
+            }
+        };
         let Some(index) = guard.iter().position(|account| account.id() == id) else {
             return false;
         };

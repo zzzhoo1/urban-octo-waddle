@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["http2"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
@@ -21,6 +21,7 @@ hmac = "0.12"
 hex = "0.4"
 aes-gcm = "0.10"
 base64 = "0.22"
+argon2 = "0.5"
 rand = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 tracing = "0.1"
@@ -41,4 +42,4 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# A1: panic 恢复为展开语义，由最外层捕获层按请求隔离（不再整站中断）
