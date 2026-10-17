@@ -36,6 +36,7 @@ futures-util = "0.3"
 bytes = "1"
 http-body-util = "0.1"
 rust-embed = { version = "8", features = ["axum"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [profile.release]
 opt-level = 3

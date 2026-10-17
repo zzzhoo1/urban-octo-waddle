@@ -27,6 +27,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/admin/api/info", get(info))
         .route("/admin/api/keys", get(list_keys).post(create_key))
         .route("/admin/api/keys/{name}", patch(patch_key).delete(delete_key))
+        .route("/admin/api/keys/{name}/reset-usage", post(reset_key_usage))
         .route("/admin/api/router", get(get_router).put(put_router))
         .route("/admin/api/oauth/start", post(oauth_start))
         .route("/admin/api/oauth/callback", get(oauth_callback))
@@ -239,13 +240,74 @@ async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(out)
 }
 
-async fn list_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.logs.list())
+/// B4: query params shared by logs and stats endpoints.
+#[derive(Debug, Deserialize)]
+struct LogQueryParams {
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    key_name: Option<String>,
+    #[serde(default)]
+    status_class: Option<String>,
+    #[serde(default)]
+    limit: Option<u64>,
+    #[serde(default)]
+    before: Option<String>,
+}
+
+fn parse_ts(v: &Option<String>) -> Result<Option<chrono::DateTime<chrono::Utc>>, Response> {
+    match v {
+        None => Ok(None),
+        Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
+            Ok(t) => Ok(Some(t.with_timezone(&chrono::Utc))),
+            Err(_) => Err(GatewayError::bad_request(format!("invalid timestamp: {}", s)).into_response()),
+        },
+    }
+}
+
+fn build_log_query(p: &LogQueryParams) -> Result<crate::logs::LogQuery, Response> {
+    let from = parse_ts(&p.from)?;
+    let to = parse_ts(&p.to)?;
+    let before = parse_ts(&p.before)?;
+    if let Some(class) = &p.status_class {
+        if !matches!(class.as_str(), "2xx" | "4xx" | "5xx") {
+            return Err(GatewayError::bad_request(format!("invalid status_class: {}", class)).into_response());
+        }
+    }
+    Ok(crate::logs::LogQuery {
+        from,
+        to,
+        model: p.model.clone().filter(|s| !s.is_empty()),
+        key_name: p.key_name.clone().filter(|s| !s.is_empty()),
+        status_class: p.status_class.clone().filter(|s| !s.is_empty()),
+        limit: p.limit,
+        before,
+    })
+}
+
+async fn list_logs(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(p): axum::extract::Query<LogQueryParams>,
+) -> Response {
+    match build_log_query(&p) {
+        Ok(q) => Json(state.logs.list(&q)).into_response(),
+        Err(resp) => resp,
+    }
 }
 
 /// Usage statistics for the dashboard (totals, by-day, by-model, by-key).
-async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(state.logs.stats())
+async fn stats(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(p): axum::extract::Query<LogQueryParams>,
+) -> Response {
+    match build_log_query(&p) {
+        Ok(q) => Json(state.logs.stats(&q)).into_response(),
+        Err(resp) => resp,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -317,6 +379,12 @@ struct KeyDto {
     is_master: bool,
     /// A2: 仍为无盐 SHA-256 摘要时为真，面板提示轮换。
     legacy_hash: bool,
+    /// B3: 配额周期（none/daily/monthly）。
+    quota_period: String,
+    /// B3: 当前周期起始时刻（UTC）。
+    quota_period_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// B3: 周期内已用 token。
+    tokens_used_in_period: u64,
 }
 
 fn key_dto(k: &ApiKey) -> KeyDto {
@@ -333,6 +401,9 @@ fn key_dto(k: &ApiKey) -> KeyDto {
         role: k.role.as_str().to_string(),
         is_master: k.is_master,
         legacy_hash: k.legacy_hash,
+        quota_period: k.quota_period.as_str().to_string(),
+        quota_period_start: k.quota_period_start,
+        tokens_used_in_period: k.tokens_used_in_period,
     }
 }
 
@@ -355,6 +426,9 @@ struct CreateKeyReq {
     /// A2: 新建密钥默认 user 角色，需显式传 admin 才创建管理密钥。
     #[serde(default)]
     role: Option<String>,
+    /// B3: 配额周期，缺省 none（累计语义）。
+    #[serde(default)]
+    quota_period: Option<String>,
 }
 
 async fn create_key(
@@ -377,6 +451,16 @@ async fn create_key(
             KeyRole::User
         }
     };
+    // B3: 未知配额周期取值返回 400。
+    let quota_period = match req.quota_period.as_deref() {
+        None | Some("") | Some("none") => crate::auth::QuotaPeriod::None,
+        Some("daily") => crate::auth::QuotaPeriod::Daily,
+        Some("monthly") => crate::auth::QuotaPeriod::Monthly,
+        Some(other) => {
+            return GatewayError::bad_request(format!("unknown quota_period: {}", other))
+                .into_response()
+        }
+    };
     let entry = ApiKey {
         name: req.name.clone(),
         key_hash: hash_key_slow(&req.key),
@@ -391,6 +475,13 @@ async fn create_key(
         role,
         is_master: false,
         legacy_hash: false,
+        quota_period,
+        quota_period_start: if quota_period == crate::auth::QuotaPeriod::None {
+            None
+        } else {
+            Some(quota_period.period_start(chrono::Utc::now()))
+        },
+        tokens_used_in_period: 0,
     };
     let dto = key_dto(&entry);
     state.keys.upsert(entry);
@@ -405,11 +496,39 @@ struct PatchKeyReq {
     enabled: Option<bool>,
     #[serde(default)]
     token_quota: Option<u64>,
-    #[serde(default)]
-    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// B3: 显式置空语义——字段出现且为 null 表示清除过期时间（永不过期），
+    /// 字段缺省表示不修改。用自定义枚举区分三态。
+    #[serde(default, deserialize_with = "deserialize_optional_datetime")]
+    expires_at: PatchField<chrono::DateTime<chrono::Utc>>,
     /// A2: 可选角色变更；主密钥任何修改均拒绝。
     #[serde(default)]
     role: Option<String>,
+    /// B3: 模型白名单可修改；空数组 = 放开为全部模型；缺省不修改。
+    #[serde(default)]
+    model_allowlist: Option<Vec<String>>,
+    /// B3: 配额周期可修改；缺省不修改。
+    #[serde(default)]
+    quota_period: Option<String>,
+}
+
+/// B3: tri-state patch field — Absent (unchanged), Null (clear), Set(value).
+#[derive(Debug, Clone, Default)]
+enum PatchField<T> {
+    #[default]
+    Absent,
+    Null,
+    Set(T),
+}
+
+fn deserialize_optional_datetime<'de, D>(d: D) -> Result<PatchField<chrono::DateTime<chrono::Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<chrono::DateTime<chrono::Utc>>::deserialize(d)?;
+    Ok(match v {
+        None => PatchField::Null,
+        Some(t) => PatchField::Set(t),
+    })
 }
 
 async fn patch_key(
@@ -431,8 +550,34 @@ async fn patch_key(
     if let Some(q) = req.token_quota {
         key.token_quota = q;
     }
-    if req.expires_at.is_some() {
-        key.expires_at = req.expires_at;
+    // B3: 显式置空语义——null 清除过期时间，Set 更新，Absent 不修改。
+    match req.expires_at {
+        PatchField::Null => key.expires_at = None,
+        PatchField::Set(t) => key.expires_at = Some(t),
+        PatchField::Absent => {}
+    }
+    // B3: 白名单可修改，空数组 = 全部模型。
+    if let Some(list) = req.model_allowlist {
+        key.model_allowlist = list;
+    }
+    // B3: 配额周期可修改；切换周期时重置周期起点与周期内用量。
+    if let Some(p) = req.quota_period.as_deref() {
+        let period = match crate::auth::QuotaPeriod::parse(p) {
+            Some(v) => v,
+            None => {
+                return GatewayError::bad_request(format!("unknown quota_period: {}", p))
+                    .into_response()
+            }
+        };
+        if period != key.quota_period {
+            key.quota_period = period;
+            key.quota_period_start = if period == crate::auth::QuotaPeriod::None {
+                None
+            } else {
+                Some(period.period_start(chrono::Utc::now()))
+            };
+            key.tokens_used_in_period = 0;
+        }
     }
     if let Some(r) = req.role.as_deref() {
         match r {
@@ -448,6 +593,26 @@ async fn patch_key(
     state.keys.upsert(key);
     persist_keys(&state);
     actor.audit("patch_key", &name);
+    Json(dto).into_response()
+}
+
+/// B3: 重置当前周期用量（累计值不变）。
+async fn reset_key_usage(
+    State(state): State<Arc<AppState>>,
+    actor: AdminActor,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(mut key) = state.keys.get_by_name(&name) else {
+        return GatewayError::bad_request("key not found").into_response();
+    };
+    key.tokens_used_in_period = 0;
+    if key.quota_period != crate::auth::QuotaPeriod::None {
+        key.quota_period_start = Some(key.quota_period.period_start(chrono::Utc::now()));
+    }
+    let dto = key_dto(&key);
+    state.keys.upsert(key);
+    persist_keys(&state);
+    actor.audit("reset_key_usage", &name);
     Json(dto).into_response()
 }
 
@@ -489,27 +654,17 @@ async fn put_router(
     actor: AdminActor,
     Json(req): Json<PutRouterReq>,
 ) -> Response {
-    // Validate: alias and pattern are mutually exclusive per rule.
-    for r in &req.rules {
-        if !r.alias.is_empty() && !r.pattern.is_empty() {
-            return GatewayError::bad_request(
-                "alias and pattern are mutually exclusive in one rule",
-            )
-            .into_response();
-        }
-        if r.alias.is_empty() && r.pattern.is_empty() {
-            return GatewayError::bad_request("each rule needs an alias or a pattern")
-                .into_response();
-        }
-        if r.target.is_empty() {
-            return GatewayError::bad_request("each rule needs a target model").into_response();
-        }
-    }
-    let rule_count = req.rules.len();
-    state.router.replace(crate::router::RouterConfig {
+    // B1: 校验前移——保存前校验互斥/必填/glob 语法/别名去重，
+    // 非法时整体原子拒绝（不做部分保存），message 指明规则序号与原因。
+    let new_cfg = crate::router::RouterConfig {
         rules: req.rules,
         downgrade: req.downgrade,
-    });
+    };
+    if let Err(reason) = crate::router::validate_config(&new_cfg) {
+        return GatewayError::bad_request(reason).into_response();
+    }
+    let rule_count = new_cfg.rules.len();
+    state.router.replace(new_cfg);
     persist_router(&state);
     actor.audit("put_router", &format!("{} rules", rule_count));
     Json(state.router.config()).into_response()

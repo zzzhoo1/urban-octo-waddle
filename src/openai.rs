@@ -77,6 +77,10 @@ pub struct ChatCompletionRequest {
     /// Reasoning effort tier (low/medium/high/xhigh/max), passed to upstream.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning_effort: String,
+    /// B2 gateway extension: mark this request as a background task.
+    /// Never forwarded upstream (build_chat_body only picks known fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
 }
 
 impl ChatCompletionRequest {

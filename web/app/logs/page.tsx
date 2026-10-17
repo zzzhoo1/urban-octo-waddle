@@ -37,6 +37,8 @@ function dash(v?: number | null, fmt?: (n: number) => string): string {
 const RANGES = [
   { key: "1h", label: "最近 1 小时", ms: 3600_000 },
   { key: "today", label: "今天", ms: 86400_000 },
+  { key: "7d", label: "最近 7 天", ms: 7 * 86400_000 },
+  { key: "30d", label: "最近 30 天", ms: 30 * 86400_000 },
   { key: "all", label: "全部", ms: Infinity },
 ] as const;
 
@@ -48,6 +50,9 @@ function LogCard({ log }: { log: RequestLog }) {
     ["模型", <span key="m" className="font-medium">{log.model || "-"}</span>],
     ["状态码", statusBadge(log.status)],
     ["密钥", log.key_name || "-"],
+    ["账号", log.account_id || "-"],
+    ["解析层级", log.route_via || "-"],
+    ["尝试次数", log.attempts && log.attempts > 1 ? `${log.attempts} 次` : "1 次"],
     ["来源 IP", <span key="ip" className="font-mono text-xs">{log.source_ip || "-"}</span>],
     ["首字延迟", dash(log.ttft_ms && log.ttft_ms > 0 ? log.ttft_ms : undefined, formatLatency)],
     ["总耗时", formatLatency(log.latency_ms)],
@@ -166,6 +171,9 @@ export default function LogsPage() {
                         <TableHead>时间</TableHead>
                         <TableHead>模型</TableHead>
                         <TableHead>密钥</TableHead>
+                        <TableHead>账号</TableHead>
+                        <TableHead>解析层级</TableHead>
+                        <TableHead>尝试</TableHead>
                         <TableHead>来源 IP</TableHead>
                         <TableHead>状态码</TableHead>
                         <TableHead>首字延迟</TableHead>
@@ -183,6 +191,14 @@ export default function LogsPage() {
                           </TableCell>
                           <TableCell className="font-medium">{log.model || "-"}</TableCell>
                           <TableCell className="text-xs">{log.key_name || "-"}</TableCell>
+                          <TableCell className="text-xs" title={log.retry_account_ids?.length ? `重试链：${log.retry_account_ids.join(" → ")}` : undefined}>
+                            {log.account_id || "-"}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {log.route_via || "-"}
+                            {log.downgrade_observed ? "（观察）" : ""}
+                          </TableCell>
+                          <TableCell className="text-xs">{log.attempts && log.attempts > 1 ? `${log.attempts}` : "1"}</TableCell>
                           <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">
                             {log.source_ip || "-"}
                           </TableCell>

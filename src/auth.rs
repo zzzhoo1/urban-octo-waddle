@@ -60,6 +60,61 @@ fn default_true() -> bool {
     true
 }
 
+/// Quota reset period (B3). `none` keeps the legacy cumulative semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaPeriod {
+    None,
+    Daily,
+    Monthly,
+}
+
+impl Default for QuotaPeriod {
+    fn default() -> Self {
+        QuotaPeriod::None
+    }
+}
+
+impl QuotaPeriod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuotaPeriod::None => "none",
+            QuotaPeriod::Daily => "daily",
+            QuotaPeriod::Monthly => "monthly",
+        }
+    }
+
+    /// Parse a period from a string (B3: unknown values are rejected by the
+    /// admin API with 400; here they map to None for serde leniency).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(QuotaPeriod::None),
+            "daily" => Some(QuotaPeriod::Daily),
+            "monthly" => Some(QuotaPeriod::Monthly),
+            _ => None,
+        }
+    }
+
+    /// Start of the period containing `now` (UTC).
+    pub fn period_start(self, now: DateTime<Utc>) -> DateTime<Utc> {
+        use chrono::Datelike;
+        match self {
+            QuotaPeriod::None => DateTime::from_timestamp(0, 0).unwrap_or(now),
+            QuotaPeriod::Daily => {
+                DateTime::from_timestamp(now.timestamp() - (now.timestamp() % 86_400), 0)
+                    .unwrap_or(now)
+            }
+            QuotaPeriod::Monthly => now
+                .with_day(1)
+                .and_then(|d| d.with_hour(0))
+                .and_then(|d| d.with_minute(0))
+                .and_then(|d| d.with_second(0))
+                .and_then(|d| d.with_nanosecond(0))
+                .unwrap_or(now),
+        }
+    }
+}
+
 /// A named API key with optional expiry, per-model allowlist and token quota.
 /// The plaintext key is stored hashed so the file can be backed up without
 /// exposing usable secrets. New keys use argon2id with a per-key random salt;
@@ -104,6 +159,15 @@ pub struct ApiKey {
     /// True while the entry still uses the legacy unsalted SHA-256 digest.
     #[serde(default)]
     pub legacy_hash: bool,
+    /// B3: quota reset period (none/daily/monthly), default none (cumulative).
+    #[serde(default)]
+    pub quota_period: QuotaPeriod,
+    /// B3: start of the current quota period (UTC); 0 for period=none.
+    #[serde(default)]
+    pub quota_period_start: Option<DateTime<Utc>>,
+    /// B3: tokens consumed within the current period.
+    #[serde(default)]
+    pub tokens_used_in_period: u64,
 }
 
 impl ApiKey {
@@ -111,8 +175,46 @@ impl ApiKey {
         self.expires_at.map(|t| now > t).unwrap_or(false)
     }
 
+    /// B3: lazily roll the quota period forward if the boundary has passed.
+    /// Returns true when a roll happened (caller should persist).
+    pub fn roll_quota_period(&mut self, now: DateTime<Utc>) -> bool {
+        if self.quota_period == QuotaPeriod::None {
+            return false;
+        }
+        let start = self.quota_period_start.unwrap_or(now);
+        let cur = self.quota_period.period_start(now);
+        if start < cur {
+            self.quota_period_start = Some(cur);
+            self.tokens_used_in_period = 0;
+            return true;
+        }
+        false
+    }
+
+    /// B3: quota check based on in-period usage (falls back to cumulative
+    /// usage when the period is none, preserving legacy semantics).
     pub fn quota_exceeded(&self) -> bool {
-        self.token_quota > 0 && self.tokens_used >= self.token_quota
+        if self.token_quota == 0 {
+            return false;
+        }
+        if self.quota_period == QuotaPeriod::None {
+            self.tokens_used >= self.token_quota
+        } else {
+            self.tokens_used_in_period >= self.token_quota
+        }
+    }
+
+    /// B3: in-period usage ratio (0.0-1.0+); None when unlimited.
+    pub fn quota_usage_ratio(&self) -> Option<f64> {
+        if self.token_quota == 0 {
+            return None;
+        }
+        let used = if self.quota_period == QuotaPeriod::None {
+            self.tokens_used
+        } else {
+            self.tokens_used_in_period
+        };
+        Some(used as f64 / self.token_quota as f64)
     }
 
     pub fn model_allowed(&self, model: &str) -> bool {
@@ -335,10 +437,13 @@ impl KeyAuth {
 
     /// Authenticate a data-plane caller for a specific model. The role does
     /// not participate in data-plane decisions (A2 规格第 3 条)。
+    /// B1: allowlist matches the client-supplied name OR the resolved
+    /// upstream model name — either hit passes.
     pub fn authenticate_for_model(
         &self,
         plaintext: &str,
         model: &str,
+        resolved_model: &str,
     ) -> Result<AuthIdentity, AuthFailure> {
         let Some(key) = self.lookup(plaintext) else {
             return Err(AuthFailure::UnknownKey);
@@ -352,7 +457,9 @@ impl KeyAuth {
         if key.quota_exceeded() {
             return Err(AuthFailure::QuotaExceeded);
         }
-        if !model.is_empty() && !key.model_allowed(model) {
+        let client_ok = model.is_empty() || key.model_allowed(model);
+        let resolved_ok = !resolved_model.is_empty() && key.model_allowed(resolved_model);
+        if !client_ok && !resolved_ok {
             return Err(AuthFailure::ModelNotAllowed);
         }
         Ok(AuthIdentity {
@@ -360,6 +467,58 @@ impl KeyAuth {
             role: key.role,
             is_master: key.is_master,
         })
+    }
+
+    /// B3: quota snapshot for X-Gateway-* headers: (in-period usage,
+    /// quota, soft-threshold warning at 90%).
+    pub fn quota_snapshot(&self, fingerprint: &str) -> (u64, u64, bool) {
+        match self.keys.read() {
+            Ok(g) => match g.get(fingerprint) {
+                Some(k) => {
+                    let used = if k.quota_period == QuotaPeriod::None {
+                        k.tokens_used
+                    } else {
+                        k.tokens_used_in_period
+                    };
+                    let warning = k.token_quota > 0 && used * 10 >= k.token_quota * 9;
+                    (used, k.token_quota, warning)
+                }
+                None => (0, 0, false),
+            },
+            Err(_) => {
+                tracing::error!("auth keys lock poisoned (read)");
+                (0, 0, false)
+            }
+        }
+    }
+
+    /// B3: lazily roll quota periods at authentication time. Rolled entries
+    /// are marked dirty so the existing keys.json persist path flushes them.
+    pub fn roll_quota_periods(&self) {
+        let now = Utc::now();
+        let mut rolled = Vec::new();
+        let mut guard = match self.keys.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("auth keys lock poisoned (write), quota roll dropped");
+                return;
+            }
+        };
+        for (fp, key) in guard.iter_mut() {
+            if key.roll_quota_period(now) {
+                rolled.push(fp.clone());
+            }
+        }
+        drop(guard);
+        if !rolled.is_empty() {
+            match self.dirty.write() {
+                Ok(mut d) => d.extend(rolled.iter().cloned()),
+                Err(_) => {
+                    tracing::error!("auth dirty lock poisoned (write), quota roll persist skipped");
+                }
+            }
+            tracing::info!(count = rolled.len(), "quota periods rolled");
+        }
     }
 
     /// Admin-plane auth: valid key + admin role required. Returns
@@ -414,6 +573,7 @@ impl KeyAuth {
     }
 
     /// Record token consumption against a key (by fingerprint).
+    /// B3: both the cumulative total and the in-period counter advance.
     pub fn record_usage(&self, fingerprint: &str, tokens: u64) {
         if tokens == 0 {
             return;
@@ -422,6 +582,7 @@ impl KeyAuth {
             Ok(mut guard) => {
                 if let Some(key) = guard.get_mut(fingerprint) {
                     key.tokens_used = key.tokens_used.saturating_add(tokens);
+                    key.tokens_used_in_period = key.tokens_used_in_period.saturating_add(tokens);
                 }
             }
             Err(_) => {

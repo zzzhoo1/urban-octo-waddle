@@ -4,18 +4,20 @@ use serde::{Deserialize, Serialize};
 
 /// A single model routing rule.
 ///
-/// Resolution order:
-/// 1. Exact alias match (`alias == request model`)
-/// 2. Regex match (`pattern` matches request model)
-/// First matching rule in list order wins.
+/// B1: resolution is single-pass in strict list order — for each rule,
+/// "alias exact match" or "glob pattern match"; the first hit wins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRule {
     /// Exact model name to match (mutually exclusive with pattern).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub alias: String,
-    /// Regex pattern to match (mutually exclusive with alias).
+    /// Glob pattern to match (mutually exclusive with alias).
+    /// Supported syntax: `*` (any run), `?` (single char), `{a,b}` alternation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pattern: String,
+    /// Read-only echo of the pattern syntax; always `glob` since B1.
+    #[serde(default = "default_pattern_syntax")]
+    pub pattern_syntax: String,
     /// Concrete upstream model the request is routed to.
     pub target: String,
     /// Optional default reasoning_effort injected when client omits it.
@@ -26,9 +28,9 @@ pub struct RouteRule {
     pub note: String,
 }
 
-/// Background-task downgrading: requests whose model matches the source
-/// tier are silently rerouted to the cheap model, preserving premium quota
-/// for foreground traffic (mirrors Antigravity's silent downgrading idea).
+/// Background-task downgrading (B2): requests whose model matches a source
+/// are silently rerouted to the cheap target, preserving premium quota for
+/// foreground traffic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DowngradeRule {
     /// Model names considered background/cheap-tier sources.
@@ -38,10 +40,25 @@ pub struct DowngradeRule {
     pub target: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// B2: enable heuristic background detection (signals: tools + tool-role
+    /// history, `bg-` user prefix; at least 2 signals required). Default off.
+    #[serde(default)]
+    pub use_heuristic: bool,
+    /// B2: also force reasoning_effort to `low` when downgrading. Default off.
+    #[serde(default)]
+    pub also_downgrade_effort: bool,
+    /// B2: log-only mode — record "would have downgraded" without rewriting
+    /// the model. For canary-validating heuristic accuracy. Default off.
+    #[serde(default)]
+    pub log_only: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_pattern_syntax() -> String {
+    "glob".to_string()
 }
 
 /// Router configuration persisted to JSON.
@@ -51,6 +68,37 @@ pub struct RouterConfig {
     pub rules: Vec<RouteRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downgrade: Option<DowngradeRule>,
+}
+
+/// B1: validate a router config before saving. Returns a human-readable
+/// error mentioning the 1-based rule index; the caller must reject the
+/// whole config atomically (no partial saves).
+pub fn validate_config(cfg: &RouterConfig) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (i, rule) in cfg.rules.iter().enumerate() {
+        let n = i + 1;
+        if !rule.alias.is_empty() && !rule.pattern.is_empty() {
+            return Err(format!("rule {}: alias and pattern are mutually exclusive", n));
+        }
+        if rule.alias.is_empty() && rule.pattern.is_empty() {
+            return Err(format!("rule {}: each rule needs an alias or a pattern", n));
+        }
+        if rule.target.is_empty() {
+            return Err(format!("rule {}: each rule needs a target model", n));
+        }
+        if !rule.pattern.is_empty() {
+            if let Err(reason) = glob::validate(&rule.pattern) {
+                return Err(format!(
+                    "rule {}: invalid pattern '{}': {}",
+                    n, rule.pattern, reason
+                ));
+            }
+        }
+        if !rule.alias.is_empty() && !seen.insert(rule.alias.as_str()) {
+            return Err(format!("rule {}: duplicate alias '{}'", n, rule.alias));
+        }
+    }
+    Ok(())
 }
 
 /// Model router: resolves incoming model names through user rules, then
@@ -74,13 +122,15 @@ pub const BUILTIN_TIERS: &[BuiltinTier] = &[
     BuiltinTier { name: "deep-model", model: "GLM-5.2", effort: "max" },
 ];
 
-/// Result of a resolution: the target model, optional effort, and which
-/// layer produced the answer (for observability in logs/panel).
+/// Result of a resolution: the target model, optional effort, which layer
+/// produced the answer, and the B2 log-only observation flag.
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub model: String,
     pub effort: String,
     pub via: ResolutionLayer,
+    /// B2: true when log_only mode observed a would-be downgrade.
+    pub downgrade_observed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,13 +178,11 @@ impl ModelRouter {
         }
     }
 
-    /// Resolve a requested model + effort into (target model, effort).
-    ///
-    /// - User rules checked first (exact alias, then regex pattern, in order).
-    /// - If `is_background` and a downgrade rule covers the resolved model,
-    ///   the request is silently rerouted to the cheap target.
-    /// - Otherwise built-in tiers, then passthrough.
-    pub fn resolve(&self, model: &str, effort: &str, is_background: bool) -> Resolved {
+    /// Base resolution (user rules -> builtin tiers -> passthrough) without
+    /// the background downgrade. B1: single pass, strict list order — the
+    /// first rule whose alias equals the model or whose glob pattern matches
+    /// wins. B2: allowlist checks and audit use this pre-downgrade result.
+    pub fn resolve_base(&self, model: &str, effort: &str) -> Resolved {
         let cfg = match self.cfg.read() {
             Ok(g) => g,
             Err(_) => {
@@ -143,73 +191,94 @@ impl ModelRouter {
                     model: model.to_string(),
                     effort: effort.to_string(),
                     via: ResolutionLayer::Passthrough,
+                    downgrade_observed: false,
                 };
             }
         };
 
-        // 1. User rules: exact alias first, then regex.
+        // 1. User rules: alias exact match or glob pattern match, in order.
         for rule in &cfg.rules {
-            if !rule.alias.is_empty() && rule.alias == model {
-                return self.apply_downgrade(
-                    &cfg,
-                    rule.target.clone(),
-                    if effort.is_empty() { rule.effort.clone() } else { effort.to_string() },
-                    is_background,
-                    ResolutionLayer::UserRule,
-                );
-            }
-        }
-        for rule in &cfg.rules {
-            if rule.pattern.is_empty() {
-                continue;
-            }
-            if let Ok(re) = regex_lite::Regex::new(&rule.pattern) {
-                if re.is_match(model) {
-                    return self.apply_downgrade(
-                        &cfg,
-                        rule.target.clone(),
-                        if effort.is_empty() { rule.effort.clone() } else { effort.to_string() },
-                        is_background,
-                        ResolutionLayer::UserRule,
-                    );
-                }
+            let hit = if !rule.alias.is_empty() {
+                rule.alias == model
+            } else if !rule.pattern.is_empty() {
+                glob::matches(&rule.pattern, model)
+            } else {
+                false
+            };
+            if hit {
+                return Resolved {
+                    model: rule.target.clone(),
+                    effort: if effort.is_empty() {
+                        rule.effort.clone()
+                    } else {
+                        effort.to_string()
+                    },
+                    via: ResolutionLayer::UserRule,
+                    downgrade_observed: false,
+                };
             }
         }
 
         // 2. Built-in tiers.
         if let Some(t) = BUILTIN_TIERS.iter().find(|t| t.name == model) {
-            let eff = if effort.is_empty() {
-                t.effort.to_string()
-            } else {
-                effort.to_string()
+            return Resolved {
+                model: t.model.to_string(),
+                effort: if effort.is_empty() {
+                    t.effort.to_string()
+                } else {
+                    effort.to_string()
+                },
+                via: ResolutionLayer::BuiltinTier,
+                downgrade_observed: false,
             };
-            return self.apply_downgrade(&cfg, t.model.to_string(), eff, is_background, ResolutionLayer::BuiltinTier);
         }
 
         // 3. Passthrough.
-        self.apply_downgrade(&cfg, model.to_string(), effort.to_string(), is_background, ResolutionLayer::Passthrough)
+        Resolved {
+            model: model.to_string(),
+            effort: effort.to_string(),
+            via: ResolutionLayer::Passthrough,
+            downgrade_observed: false,
+        }
     }
 
-    fn apply_downgrade(
-        &self,
-        cfg: &RouterConfig,
-        model: String,
-        effort: String,
-        is_background: bool,
-        via: ResolutionLayer,
-    ) -> Resolved {
-        if is_background {
-            if let Some(d) = &cfg.downgrade {
-                if d.enabled && d.sources.iter().any(|s| s == &model) {
+    /// B2: apply the background downgrade on top of a base resolution.
+    /// `log_only` keeps the model but marks the entry as observed so the
+    /// audit log can show "would have downgraded".
+    pub fn apply_downgrade(&self, base: Resolved, is_background: bool) -> Resolved {
+        if !is_background {
+            return base;
+        }
+        let cfg = match self.cfg.read() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("router config lock poisoned (read), downgrade skipped");
+                return base;
+            }
+        };
+        if let Some(d) = &cfg.downgrade {
+            if d.enabled && d.sources.iter().any(|s| s == &base.model) {
+                if d.log_only {
                     return Resolved {
-                        model: d.target.clone(),
-                        effort,
+                        model: base.model,
+                        effort: base.effort,
                         via: ResolutionLayer::Downgrade,
+                        downgrade_observed: true,
                     };
                 }
+                return Resolved {
+                    model: d.target.clone(),
+                    effort: if d.also_downgrade_effort {
+                        "low".to_string()
+                    } else {
+                        base.effort
+                    },
+                    via: ResolutionLayer::Downgrade,
+                    downgrade_observed: false,
+                };
             }
         }
-        Resolved { model, effort, via }
+        base
     }
 
     /// Public model ids exposed via /v1/models: user aliases + builtin tiers.
@@ -229,44 +298,94 @@ impl ModelRouter {
     }
 }
 
-/// Minimal regex-lite shim: we avoid a full regex dependency for simple
-/// patterns; supports the common subset used for model routing
-/// (prefix*, exact, and .-style wildcards via the `regex-lite` crate if
-/// available at build time; otherwise a tiny glob matcher).
-mod regex_lite {
-    pub struct Regex {
-        glob: String,
+/// B1: glob pattern engine. Supported syntax: `*` (any run of chars),
+/// `?` (exactly one char), `{a,b,...}` (alternation). Any other regex-style
+/// metacharacter is rejected at validation time — no silent fallback to
+/// substring matching.
+mod glob {
+    /// Validate a pattern; Err carries a human-readable reason.
+    pub fn validate(pattern: &str) -> Result<(), String> {
+        if pattern.is_empty() {
+            return Err("pattern is empty".to_string());
+        }
+        let mut depth = 0usize;
+        for c in pattern.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    if depth > 1 {
+                        return Err("nested '{...}' alternation is not supported".to_string());
+                    }
+                }
+                '}' => {
+                    if depth == 0 {
+                        return Err("unmatched '}'".to_string());
+                    }
+                    depth -= 1;
+                }
+                '*' | '?' | ',' => {}
+                '|' | '^' | '$' | '.' | '[' | ']' | '(' | ')' | '+' | '\' => {
+                    return Err(format!(
+                        "metacharacter '{}' is not supported (allowed: * ? {{a,b}})",
+                        c
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            return Err("unmatched '{'".to_string());
+        }
+        Ok(())
     }
 
-    impl Regex {
-        pub fn new(pattern: &str) -> Result<Self, ()> {
-            Ok(Self {
-                glob: pattern.to_string(),
-            })
-        }
-
-        /// Very small matcher: supports leading ^, trailing $, .* and literal
-        /// segments. Anything more exotic falls back to substring match.
-        pub fn is_match(&self, text: &str) -> bool {
-            let p = self.glob.as_str();
-            if p == ".*" || p == ".+" {
+    /// Match `text` against a glob `pattern`.
+    pub fn matches(pattern: &str, text: &str) -> bool {
+        for variant in expand(pattern) {
+            let p: Vec<char> = variant.chars().collect();
+            let t: Vec<char> = text.chars().collect();
+            if match_here(&p, &t) {
                 return true;
             }
-            let anchored_start = p.starts_with('^');
-            let anchored_end = p.ends_with('$');
-            let core = p.trim_start_matches('^').trim_end_matches('$');
-            if let Some(prefix) = core.strip_suffix(".*") {
-                return text.starts_with(prefix);
+        }
+        false
+    }
+
+    /// Expand `{a,b}` alternations into concrete variants.
+    fn expand(pattern: &str) -> Vec<String> {
+        if let Some(start) = pattern.find('{') {
+            if let Some(rel) = pattern[start..].find('}') {
+                let end = start + rel;
+                let prefix = &pattern[..start];
+                let body = &pattern[start + 1..end];
+                let suffix = &pattern[end + 1..];
+                let mut out = Vec::new();
+                for alt in body.split(',') {
+                    for s in expand(&format!("{}{}{}", prefix, alt, suffix)) {
+                        out.push(s);
+                    }
+                }
+                return out;
             }
-            if let Some(suffix) = core.strip_prefix(".*") {
-                return text.ends_with(suffix);
+        }
+        vec![pattern.to_string()]
+    }
+
+    fn match_here(pat: &[char], txt: &[char]) -> bool {
+        if pat.is_empty() {
+            return txt.is_empty();
+        }
+        match pat[0] {
+            '*' => {
+                for skip in 0..=txt.len() {
+                    if match_here(&pat[1..], &txt[skip..]) {
+                        return true;
+                    }
+                }
+                false
             }
-            match (anchored_start, anchored_end) {
-                (true, true) => text == core,
-                (true, false) => text.starts_with(core),
-                (false, true) => text.ends_with(core),
-                (false, false) => text.contains(core),
-            }
+            '?' => !txt.is_empty() && match_here(&pat[1..], &txt[1..]),
+            c => !txt.is_empty() && txt[0] == c && match_here(&pat[1..], &txt[1..]),
         }
     }
 }

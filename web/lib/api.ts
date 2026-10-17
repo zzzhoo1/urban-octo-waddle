@@ -34,6 +34,16 @@ export interface RequestLog {
   cached_tokens?: number;
   source_ip?: string;
   key_name?: string;
+  /** B4: 解析层级（user_rule / downgrade / builtin_tier / passthrough） */
+  route_via?: string;
+  /** B4: 实际调用的上游模型名 */
+  resolved_model?: string;
+  /** B4: 尝试次数（含首次） */
+  attempts?: number;
+  /** B4: 重试账号链（按尝试顺序） */
+  retry_account_ids?: string[];
+  /** B4: log_only 降级观察标记 */
+  downgrade_observed?: boolean;
 }
 
 export interface GatewayInfo {
@@ -83,6 +93,12 @@ export interface ApiKeyInfo {
   is_master: boolean;
   /** A2: 仍为旧 SHA-256 摘要时提示轮换 */
   legacy_hash: boolean;
+  /** B3: 配额周期（none/daily/monthly） */
+  quota_period: string;
+  /** B3: 当前周期起始时刻（UTC） */
+  quota_period_start?: string | null;
+  /** B3: 周期内已用 token */
+  tokens_used_in_period: number;
 }
 
 export interface StatsResponse {
@@ -119,6 +135,12 @@ export interface RouterConfig {
     sources: string[];
     target: string;
     enabled: boolean;
+    /** B2: 启发式后台判定（tools+tool 历史、bg- 前缀，双信号阈值） */
+    use_heuristic?: boolean;
+    /** B2: 降级时同时把 reasoning_effort 压到 low */
+    also_downgrade_effort?: boolean;
+    /** B2: 只记录不改写（灰度观察模式） */
+    log_only?: boolean;
   } | null;
 }
 
@@ -203,6 +225,10 @@ export const api = {
       token_quota?: number;
       expires_at?: string | null;
       role?: "admin" | "user";
+      /** B3: 模型白名单，空数组 = 全部模型 */
+      model_allowlist?: string[];
+      /** B3: 配额周期 */
+      quota_period?: "none" | "daily" | "monthly";
     }
   ) =>
     request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}`, {
@@ -211,6 +237,11 @@ export const api = {
     }),
   deleteKey: (name: string) =>
     request<void>(`/keys/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** B3: 重置当前周期用量（累计值不变） */
+  resetKeyUsage: (name: string) =>
+    request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}/reset-usage`, {
+      method: "POST",
+    }),
   getRouter: () => request<RouterConfig>("/router"),
   putRouter: (cfg: RouterConfig) =>
     request<RouterConfig>("/router", {

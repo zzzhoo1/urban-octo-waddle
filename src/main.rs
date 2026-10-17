@@ -82,6 +82,23 @@ pub struct Cli {
     /// keys.json is empty.
     #[arg(long = "gw-key", default_value = "")]
     pub gw_key: String,
+
+    /// B4: SQLite audit log path (empty = same dir as the account store).
+    #[arg(long = "logs-db", default_value = "")]
+    pub logs_db: String,
+
+    /// B4: audit log retention in days.
+    #[arg(long = "logs-retention-days", default_value_t = 30)]
+    pub logs_retention_days: u64,
+
+    /// B4: audit log max row count.
+    #[arg(long = "logs-max-rows", default_value_t = 500_000)]
+    pub logs_max_rows: u64,
+
+    /// B4: trust X-Forwarded-For / X-Real-IP (default true; disable when
+    /// the gateway is directly exposed to the public internet).
+    #[arg(long = "trust-proxy-headers", default_value_t = true)]
+    pub trust_proxy_headers: bool,
 }
 
 /// Shared application state.
@@ -98,6 +115,8 @@ pub struct AppState {
     pub router: Arc<ModelRouter>,
     /// Server secret, used to derive key lookup fingerprints (A2).
     pub secret: String,
+    /// B4: whether to trust X-Forwarded-For / X-Real-IP headers.
+    pub trust_proxy_headers: bool,
 }
 
 #[tokio::main]
@@ -180,6 +199,20 @@ async fn main() -> anyhow::Result<()> {
         router.clone(),
     ));
 
+    // B4: audit log persistence — defaults to logs.db next to the account store.
+    let logs_db_path = if cli.logs_db.is_empty() {
+        let dir = std::path::Path::new(&store_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        dir.join("logs.db").to_string_lossy().to_string()
+    } else {
+        cli.logs_db.clone()
+    };
+    let logs = Arc::new(
+        RequestLog::new(500).with_db(&logs_db_path, cli.logs_retention_days, cli.logs_max_rows),
+    );
+
     let state = Arc::new(AppState {
         gateway,
         keys,
@@ -187,11 +220,12 @@ async fn main() -> anyhow::Result<()> {
         store: store.clone(),
         key_store: store,
         encryptor,
-        logs: Arc::new(RequestLog::new(500)),
+        logs,
         cfg,
         listen: cli.listen.clone(),
         router,
         secret: cli.secret.clone(),
+        trust_proxy_headers: cli.trust_proxy_headers,
     });
 
     let app = Router::new()

@@ -41,6 +41,9 @@ export default function ModelsPage() {
   const [downgradeEnabled, setDowngradeEnabled] = useState(false);
   const [downgradeSources, setDowngradeSources] = useState("");
   const [downgradeTarget, setDowngradeTarget] = useState("");
+  const [useHeuristic, setUseHeuristic] = useState(false);
+  const [alsoDowngradeEffort, setAlsoDowngradeEffort] = useState(false);
+  const [logOnly, setLogOnly] = useState(false);
   const [saving, setSaving] = useState(false);
   const [nextId, setNextId] = useState(1);
 
@@ -56,6 +59,9 @@ export default function ModelsPage() {
         setDowngradeEnabled(rc.downgrade.enabled);
         setDowngradeSources(rc.downgrade.sources.join(", "));
         setDowngradeTarget(rc.downgrade.target);
+        setUseHeuristic(rc.downgrade.use_heuristic ?? false);
+        setAlsoDowngradeEffort(rc.downgrade.also_downgrade_effort ?? false);
+        setLogOnly(rc.downgrade.log_only ?? false);
       }
     } catch (e) {
       toast.error(`加载失败：${e instanceof Error ? e.message : "未知错误"}`);
@@ -93,7 +99,7 @@ export default function ModelsPage() {
       const hasAlias = !!r.alias?.trim();
       const hasPattern = !!r.pattern?.trim();
       if (hasAlias === hasPattern) {
-        toast.error("每条规则必须且只能填『别名』或『正则』其中一项");
+        toast.error("每条规则必须且只能填『别名』或『匹配模式』其中一项");
         return;
       }
       if (!r.target.trim()) {
@@ -119,6 +125,9 @@ export default function ModelsPage() {
                 .filter(Boolean),
               target: downgradeTarget.trim(),
               enabled: true,
+              use_heuristic: useHeuristic,
+              also_downgrade_effort: alsoDowngradeEffort,
+              log_only: logOnly,
             }
           : null,
       };
@@ -228,7 +237,7 @@ export default function ModelsPage() {
               <div>
                 <CardTitle>自定义路由规则</CardTitle>
                 <CardDescription>
-                  别名精确匹配优先，其次正则匹配；客户端请求别名时自动路由到目标模型
+                  按列表顺序匹配，第一条命中即生效；匹配模式支持 * ? {a,b}（glob 语法）
                 </CardDescription>
               </div>
               <Button variant="outline" size="sm" onClick={addRule}>
@@ -257,7 +266,7 @@ export default function ModelsPage() {
                     />
                   </div>
                   <div className="col-span-3">
-                    <Label className="text-xs">正则（二选一）</Label>
+                    <Label className="text-xs">匹配模式（二选一）</Label>
                     <Input
                       placeholder="^gpt-.*"
                       value={r.pattern ?? ""}
@@ -299,29 +308,60 @@ export default function ModelsPage() {
               <div>
                 <CardTitle>后台任务自动降级</CardTitle>
                 <CardDescription>
-                  带 X-Background-Task 头的请求自动改用到便宜模型，为前台流量保留优质配额
+                  后台请求自动改用到便宜模型，为前台流量保留优质配额；降级对客户端透明，响应中的模型名仍为客户端传入名，可在调用日志中通过解析层级确认
                 </CardDescription>
               </div>
               <Switch checked={downgradeEnabled} onCheckedChange={setDowngradeEnabled} />
             </div>
           </CardHeader>
           {downgradeEnabled && (
-            <CardContent className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>降级源模型（逗号分隔）</Label>
-                <Input
-                  placeholder="GLM-5.2, kimi-k2.6-vl"
-                  value={downgradeSources}
-                  onChange={(e) => setDowngradeSources(e.target.value)}
-                />
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>降级源模型（逗号分隔）</Label>
+                  <Input
+                    placeholder="GLM-5.2, kimi-k2.6-vl"
+                    value={downgradeSources}
+                    onChange={(e) => setDowngradeSources(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>降级目标模型</Label>
+                  <Input
+                    placeholder="openpangu-2.0-flash"
+                    value={downgradeTarget}
+                    onChange={(e) => setDowngradeTarget(e.target.value)}
+                  />
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label>降级目标模型</Label>
-                <Input
-                  placeholder="openpangu-2.0-flash"
-                  value={downgradeTarget}
-                  onChange={(e) => setDowngradeTarget(e.target.value)}
-                />
+              <div className="space-y-3 rounded-md border border-[var(--border)] p-3">
+                <div className="flex items-center justify-between">
+                  <div className="leading-tight">
+                    <p className="text-sm font-medium">启发式后台判定</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      请求头与 background 字段均未标记时，按信号判定（tools+tool 角色历史、bg- 前缀 user 字段，命中 2 个信号才算后台）
+                    </p>
+                  </div>
+                  <Switch checked={useHeuristic} onCheckedChange={setUseHeuristic} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="leading-tight">
+                    <p className="text-sm font-medium">同时降级思考档位</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      降级时把 reasoning_effort 压到 low
+                    </p>
+                  </div>
+                  <Switch checked={alsoDowngradeEffort} onCheckedChange={setAlsoDowngradeEffort} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="leading-tight">
+                    <p className="text-sm font-medium">仅观察模式（log_only）</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">
+                      只记录『本应降级』而不实际改写模型，用于灰度验证启发式准确性
+                    </p>
+                  </div>
+                  <Switch checked={logOnly} onCheckedChange={setLogOnly} />
+                </div>
               </div>
             </CardContent>
           )}
