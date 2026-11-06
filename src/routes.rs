@@ -363,9 +363,15 @@ async fn handle_chat(
                 if ctx.quota_warning {
                     builder = builder.header("X-Gateway-Quota-Warning", "90");
                 }
-                builder.body(Json(resp)).unwrap_or_else(|_| {
-                    GatewayError::internal("failed to build response").into_response()
-                })
+                match serde_json::to_vec(&resp) {
+                    Ok(bytes) => builder
+                        .header("content-type", "application/json")
+                        .body(Body::from(bytes))
+                        .unwrap_or_else(|_| {
+                            GatewayError::internal("failed to build response").into_response()
+                        }),
+                    Err(_) => GatewayError::internal("failed to serialize response").into_response(),
+                }
             }
             Err(e) => {
                 let status = e.kind.status().as_u16();

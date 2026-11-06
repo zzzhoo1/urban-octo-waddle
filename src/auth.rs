@@ -97,7 +97,7 @@ impl QuotaPeriod {
 
     /// Start of the period containing `now` (UTC).
     pub fn period_start(self, now: DateTime<Utc>) -> DateTime<Utc> {
-        use chrono::Datelike;
+        use chrono::{Datelike, Timelike};
         match self {
             QuotaPeriod::None => DateTime::from_timestamp(0, 0).unwrap_or(now),
             QuotaPeriod::Daily => {
@@ -327,6 +327,9 @@ impl KeyAuth {
                 expires_at: None,
                 token_quota: 0,
                 tokens_used: 0,
+                quota_period: QuotaPeriod::None,
+                quota_period_start: None,
+                tokens_used_in_period: 0,
                 model_allowlist: Vec::new(),
                 enabled: true,
                 role: KeyRole::Admin,
