@@ -69,13 +69,9 @@ jobs:
         if: matrix.cross == 'false'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Install aarch64 cross toolchain (Ubuntu repo)
+      - name: Install cross (aarch64 musl toolchain)
         if: matrix.cross == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+        run: cargo install cross --locked
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -88,7 +84,12 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
 
       - name: Package artifact
         run: |
