@@ -237,7 +237,7 @@ export default function ModelsPage() {
               <div>
                 <CardTitle>自定义路由规则</CardTitle>
                 <CardDescription>
-                  按列表顺序匹配，第一条命中即生效；匹配模式支持 * ? {a,b}（glob 语法）
+                  按列表顺序匹配，第一条命中即生效；匹配模式支持 * ? {'{a,b}'}（glob 语法）
                 </CardDescription>
               </div>
               <Button variant="outline" size="sm" onClick={addRule}>
