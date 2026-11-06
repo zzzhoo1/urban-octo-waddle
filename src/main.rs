@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         cli.store.clone()
     };
-    let store = Arc::new(JsonFileStore::new(store_path));
+    let store = Arc::new(JsonFileStore::new(store_path.clone()));
 
     let pool = Arc::new(Pool::new());
     for acc in store.load()? {
