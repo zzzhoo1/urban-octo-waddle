@@ -818,8 +818,9 @@ fn persist(state: &Arc<AppState>) {
 }
 
 /// Persist API keys to keys.json next to the account store.
+/// 快照在持有 store 写锁之后才生成，避免旧快照覆盖新数据。
 fn persist_keys(state: &Arc<AppState>) {
-    if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+    if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
         tracing::error!("failed to persist keys: {}", e);
     }
 }
