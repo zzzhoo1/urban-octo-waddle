@@ -1,1 +1,1 @@
-<existing auth.rs content with appended #[cfg(test)] mod tests>
+FULL_ORIGINAL_AUTH_RS_CONTENT_PLUS_TESTS
