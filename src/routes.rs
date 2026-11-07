@@ -42,15 +42,21 @@ fn header_session_id(headers: &HeaderMap) -> String {
 /// 若有待落盘的 key 变更（用量、配额周期滚动、哈希升级）则写 keys.json。
 /// 快照在 store 写锁内生成；写入失败时把已取出的 dirty 标记放回，
 /// 下一次请求会重试，而不是默默丢弃这部分变更。
-fn flush_dirty_keys(state: &AppState, what: &str) {
-    let dirty = state.keys.take_dirty();
-    if dirty.is_empty() {
-        return;
-    }
-    if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
-        tracing::error!("failed to persist {}: {}", what, e);
-        state.keys.restore_dirty(dirty);
-    }
+///
+/// 文件 IO 放到 spawn_blocking，避免慢盘阻塞异步 worker；调用方丢弃
+/// JoinHandle，不等待写入完成。优雅退出时的 flush 留给后续的
+/// 后台批量落盘工作。
+fn flush_dirty_keys(state: Arc<AppState>, what: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let dirty = state.keys.take_dirty();
+        if dirty.is_empty() {
+            return;
+        }
+        if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
+            tracing::error!("failed to persist {}: {}", what, e);
+            state.keys.restore_dirty(dirty);
+        }
+    })
 }
 
 /// B4: source IP extraction. Proxy headers are only trusted when
@@ -107,7 +113,7 @@ impl Drop for StreamFinalize {
         if audit.total_tokens > 0 {
             self.state.gateway.record_usage(&self.key_hash, audit.total_tokens);
             // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
-            flush_dirty_keys(&self.state, "key usage (stream)");
+            let _ = flush_dirty_keys(self.state.clone(), "key usage (stream)");
         }
         self.state.logs.record(RequestLogEntry {
             ts: Utc::now(),
@@ -224,7 +230,7 @@ async fn handle_chat(
 
     // A2: 若本次鉴权触发了旧摘要的惰性升级，立即把新 argon2id 摘要
     // 落盘 keys.json；落盘失败时保留 dirty 标记，下次请求重试。
-    flush_dirty_keys(&state, "upgraded key hashes");
+    let _ = flush_dirty_keys(state.clone(), "upgraded key hashes");
 
     // Rewrite the request to the resolved upstream model, keeping the
     // client-visible model name for the response/logs.
@@ -350,7 +356,7 @@ async fn handle_chat(
                 if let Some(u) = &resp.usage {
                     state.gateway.record_usage(&ctx.key_hash, u.total_tokens);
                     // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
-                    flush_dirty_keys(&state, "key usage");
+                    let _ = flush_dirty_keys(state.clone(), "key usage");
                 }
                 // B2: 响应中的 model 字段始终为客户端传入名（静默降级）。
                 resp.model = client_model.clone();
@@ -409,7 +415,7 @@ async fn handle_models(
     // A2: 鉴权成功后若发生惰性升级，立即落盘 keys.json。
     let probe_key_name = state.gateway.models_probe(&api_key);
     if probe_key_name.is_some() {
-        flush_dirty_keys(&state, "upgraded key hashes");
+        let _ = flush_dirty_keys(state.clone(), "upgraded key hashes");
     }
     match state.gateway.models(&api_key).await {
         Ok(mut list) => {
@@ -460,7 +466,7 @@ async fn handle_embeddings(
     // A2: 鉴权成功后若发生惰性升级，立即落盘 keys.json。
     let probe_key_name = state.gateway.models_probe(&api_key);
     if probe_key_name.is_some() {
-        flush_dirty_keys(&state, "upgraded key hashes");
+        let _ = flush_dirty_keys(state.clone(), "upgraded key hashes");
     }
     let req: EmbeddingRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
