@@ -8,6 +8,7 @@ mod error;
 mod gateway;
 mod logs;
 mod openai;
+mod persist;
 mod router;
 mod routes;
 mod session;
@@ -17,6 +18,7 @@ mod store;
 mod upstream;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{response::Redirect, routing::get, Router};
 use clap::Parser;
@@ -258,6 +260,9 @@ async fn main() -> anyhow::Result<()> {
         trust_proxy_headers: cli.trust_proxy_headers,
     });
 
+    // 建议 2:后台批量落盘 keys.json(每 5 秒一次),退出前再 flush 一次。
+    let persist = persist::PersistHandle::start(state.clone(), Duration::from_secs(5));
+
     let app = Router::new()
         .merge(routes::v1_router(state.clone()))
         .merge(admin::admin_router(state.clone()))
@@ -274,11 +279,40 @@ async fn main() -> anyhow::Result<()> {
     let bind = normalize_listen(&cli.listen);
     tracing::info!("listening on {}", bind);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(
+
+    let shutdown = async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut s) => {
+                    s.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    };
+
+    let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(shutdown)
+    .await;
+
+    // 优雅退出:停止后台循环(等待在途写入完成),再做最后一次落盘。
+    persist.shutdown(state.clone()).await;
+    result?;
     Ok(())
 }
 
