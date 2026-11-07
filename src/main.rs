@@ -74,10 +74,6 @@ pub struct Cli {
     #[arg(long = "codearts-token", default_value = "")]
     pub codearts_token: String,
 
-    /// Auto STS (deprecated, accepted for compatibility)
-    #[arg(long = "codearts-sts-auto", default_value_t = false)]
-    pub codearts_sts_auto: bool,
-
     /// CodeArts gateway url
     #[arg(long = "codearts-gateway", default_value = CODEARTS_GATEWAY_PROD)]
     pub codearts_gateway: String,
@@ -209,7 +205,6 @@ async fn main() -> anyhow::Result<()> {
                 tokens_used: 0,
                 quota_period: crate::auth::QuotaPeriod::None,
                 quota_period_start: None,
-                tokens_used_in_period: 0,
                 model_allowlist: Vec::new(),
                 enabled: true,
                 role: crate::auth::KeyRole::Admin,
@@ -359,3 +354,6 @@ fn normalize_listen(addr: &str) -> String {
         addr.to_string()
     }
 }
+
+#[cfg(test)]
+mod auth_tests;
