@@ -99,6 +99,24 @@ pub struct Cli {
     /// the gateway is directly exposed to the public internet).
     #[arg(long = "trust-proxy-headers", default_value_t = true)]
     pub trust_proxy_headers: bool,
+    /// 授权登录客户端标识（与下方配置齐备时才启用授权入口）。
+    #[arg(long = "oauth-client-id", default_value = "")]
+    pub oauth_client_id: String,
+    /// 授权登录客户端密钥。
+    #[arg(long = "oauth-client-secret", default_value = "")]
+    pub oauth_client_secret: String,
+    /// 授权登录授权端点。
+    #[arg(long = "oauth-authorize-url", default_value = "")]
+    pub oauth_authorize_url: String,
+    /// 授权登录令牌端点。
+    #[arg(long = "oauth-token-url", default_value = "")]
+    pub oauth_token_url: String,
+    /// 授权登录回调地址。
+    #[arg(long = "oauth-redirect-uri", default_value = "")]
+    pub oauth_redirect_uri: String,
+    /// 授权登录申请的授权范围（可选）。
+    #[arg(long = "oauth-scope", default_value = "")]
+    pub oauth_scope: String,
 }
 
 /// Shared application state.
@@ -137,7 +155,16 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--gw-key is required");
     }
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default();
+    // 授权登录配置：参数齐备时启用，缺省维持未配置行为。
+    cfg.oauth = crate::config::OauthConfig {
+        client_id: cli.oauth_client_id.clone(),
+        client_secret: cli.oauth_client_secret.clone(),
+        authorize_url: cli.oauth_authorize_url.clone(),
+        token_url: cli.oauth_token_url.clone(),
+        redirect_uri: cli.oauth_redirect_uri.clone(),
+        scope: cli.oauth_scope.clone(),
+    };
     let encryptor = Arc::new(Encryptor::new(&cli.secret));
     let store_path = if cli.store.is_empty() {
         "accounts.json".to_string()

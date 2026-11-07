@@ -581,15 +581,28 @@ impl KeyAuth {
         if tokens == 0 {
             return;
         }
+        let mut changed = false;
         match self.keys.write() {
             Ok(mut guard) => {
                 if let Some(key) = guard.get_mut(fingerprint) {
                     key.tokens_used = key.tokens_used.saturating_add(tokens);
                     key.tokens_used_in_period = key.tokens_used_in_period.saturating_add(tokens);
+                    changed = true;
                 }
             }
             Err(_) => {
                 tracing::error!("auth keys lock poisoned (write), usage dropped");
+            }
+        }
+        // 用量变更后标记为待落盘，由调用方在请求收尾统一写盘一次，
+        // 避免每个请求各自写文件造成 IO 放大；同时保证进程异常退出时
+        // 内存计数与 keys.json 不会长期偏离。
+        if changed {
+            if let Ok(mut d) = self.dirty.write() {
+                let fp = fingerprint.to_string();
+                if !d.contains(&fp) {
+                    d.push(fp);
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -15,6 +15,18 @@ use crate::auth::{fingerprint_key, hash_key_slow, mask_key, ApiKey, AuthFailure,
 use crate::error::GatewayError;
 use crate::router::{DowngradeRule, RouteRule};
 use crate::AppState;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant};
+
+/// 授权登录的一次性 state 存储：state -> 过期时刻。
+/// 仅在进程内有效，10 分钟未完成回调即失效，用于防止跨站请求伪造。
+fn oauth_states() -> &'static Mutex<HashMap<String, Instant>> {
+    static STATES: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+const OAUTH_STATE_TTL: StdDuration = StdDuration::from_secs(600);
 
 /// Admin API router (all routes behind key auth).
 pub fn admin_router(state: Arc<AppState>) -> Router {
@@ -30,9 +42,11 @@ pub fn admin_router(state: Arc<AppState>) -> Router {
         .route("/admin/api/keys/{name}/reset-usage", post(reset_key_usage))
         .route("/admin/api/router", get(get_router).put(put_router))
         .route("/admin/api/oauth/start", post(oauth_start))
-        .route("/admin/api/oauth/callback", get(oauth_callback))
         .route_layer(middleware::from_fn_with_state(state.clone(), admin_auth));
-    Router::new().merge(api).with_state(state)
+    // 授权回调由浏览器外部跳转发起，天然不携带凭据，置于统一鉴权之外，
+    // 防护改由一次性 state 校验承担（10 分钟有效、用后即废）。
+    let public = Router::new().route("/admin/api/oauth/callback", get(oauth_callback));
+    Router::new().merge(public).merge(api).with_state(state)
 }
 
 /// Key auth for the admin plane: Authorization Bearer or gw_key cookie.
@@ -670,20 +684,130 @@ async fn put_router(
     Json(state.router.config()).into_response()
 }
 
-async fn oauth_start() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({"error": "oauth not configured"})),
-    )
-        .into_response()
+async fn oauth_start(State(state): State<Arc<AppState>>) -> Response {
+    let cfg = &state.cfg.oauth;
+    if !cfg.enabled() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "oauth not configured"})),
+        )
+            .into_response();
+    }
+    // 生成一次性 state（16 字节随机数），10 分钟内有效。
+    let state_token = {
+        use rand::RngCore;
+        let mut buf = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut buf);
+        hex::encode(buf)
+    };
+    let now = Instant::now();
+    if let Ok(mut guard) = oauth_states().lock() {
+        // 顺手清理过期项，避免长期运行累积。
+        guard.retain(|_, exp| now.duration_since(*exp) < OAUTH_STATE_TTL);
+        guard.insert(state_token.clone(), now);
+    }
+    let auth_url = match url::Url::parse(&cfg.authorize_url) {
+        Ok(mut u) => {
+            {
+                let mut pairs = u.query_pairs_mut();
+                pairs.append_pair("response_type", "code");
+                pairs.append_pair("client_id", &cfg.client_id);
+                pairs.append_pair("redirect_uri", &cfg.redirect_uri);
+                pairs.append_pair("state", &state_token);
+                if !cfg.scope.is_empty() {
+                    pairs.append_pair("scope", &cfg.scope);
+                }
+            }
+            u.to_string()
+        }
+        Err(_) => return GatewayError::internal("invalid oauth authorize_url").into_response(),
+    };
+    Json(serde_json::json!({"auth_url": auth_url, "state": state_token})).into_response()
 }
 
-async fn oauth_callback() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({"error": "oauth not configured"})),
-    )
-        .into_response()
+async fn oauth_callback(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let cfg = &state.cfg.oauth;
+    if !cfg.enabled() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({"error": "oauth not configured"})),
+        )
+            .into_response();
+    }
+    let code = q.get("code").cloned().unwrap_or_default();
+    let st = q.get("state").cloned().unwrap_or_default();
+    if code.is_empty() || st.is_empty() {
+        return GatewayError::bad_request("code and state are required").into_response();
+    }
+    // 校验并消费 state：一次性，用后即废，防止重放与跨站请求伪造。
+    let valid = {
+        let now = Instant::now();
+        match oauth_states().lock() {
+            Ok(mut guard) => {
+                guard.retain(|_, exp| now.duration_since(*exp) < OAUTH_STATE_TTL);
+                guard.remove(&st).is_some()
+            }
+            Err(_) => false,
+        }
+    };
+    if !valid {
+        return GatewayError::bad_request("invalid or expired state").into_response();
+    }
+    // 用授权码换取访问令牌。
+    let client = reqwest::Client::new();
+    let sent = client
+        .post(&cfg.token_url)
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code.as_str()),
+            ("client_id", cfg.client_id.as_str()),
+            ("client_secret", cfg.client_secret.as_str()),
+            ("redirect_uri", cfg.redirect_uri.as_str()),
+        ])
+        .send()
+        .await;
+    let body = match sent {
+        Ok(r) => match r.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                return GatewayError::internal(format!("read token response failed: {}", e))
+                    .into_response()
+            }
+        },
+        Err(e) => {
+            return GatewayError::internal(format!("token exchange failed: {}", e)).into_response()
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return GatewayError::internal(format!("invalid token response: {}", e)).into_response()
+        }
+    };
+    let access = parsed
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if access.is_empty() {
+        return GatewayError::bad_request("token response missing access_token").into_response();
+    }
+    // 凭据加密后入库，与手动录入走完全一致的路径。
+    let enc = match state.encryptor.encrypt(&access) {
+        Ok(e) => e,
+        Err(e) => return GatewayError::internal(format!("encrypt failed: {}", e)).into_response(),
+    };
+    let id = format!("acc-{}", chrono::Utc::now().format("%Y%m%d%H%M%S%.6f"));
+    let name = format!("oauth-{}", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+    let account = Account::new(id, name, enc);
+    let dto = to_dto(&account.data());
+    state.pool.add(account);
+    persist(&state);
+    (StatusCode::CREATED, Json(dto)).into_response()
 }
 
 /// Persist the account pool; failures are logged but do not fail the request.

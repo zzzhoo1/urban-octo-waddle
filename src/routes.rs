@@ -92,6 +92,12 @@ impl Drop for StreamFinalize {
         };
         if audit.total_tokens > 0 {
             self.state.gateway.record_usage(&self.key_hash, audit.total_tokens);
+            // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
+            if !self.state.keys.take_dirty().is_empty() {
+                if let Err(e) = self.state.key_store.save_keys(&self.state.keys.list()) {
+                    tracing::error!("failed to persist key usage (stream): {}", e);
+                }
+            }
         }
         self.state.logs.record(RequestLogEntry {
             ts: Utc::now(),
@@ -337,6 +343,12 @@ async fn handle_chat(
             Ok((mut resp, meta)) => {
                 if let Some(u) = &resp.usage {
                     state.gateway.record_usage(&ctx.key_hash, u.total_tokens);
+                    // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
+                    if !state.keys.take_dirty().is_empty() {
+                        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+                            tracing::error!("failed to persist key usage: {}", e);
+                        }
+                    }
                 }
                 // B2: 响应中的 model 字段始终为客户端传入名（静默降级）。
                 resp.model = client_model.clone();

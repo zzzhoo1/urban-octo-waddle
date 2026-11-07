@@ -22,8 +22,33 @@ pub struct GatewayConfig {
     pub account_recover_after: Duration,
     /// Linear backoff base before the n-th retry (delay = (n+1) * base).
     pub retry_backoff: Duration,
+    /// 可选的授权登录配置；缺省为未配置，OAuth 入口保持原有行为。
+    pub oauth: OauthConfig,
 }
 
+/// OAuth login configuration for the admin panel (optional).
+///
+/// 当授权端点、令牌端点与客户端标识任一缺失时保持未配置状态，
+/// OAuth 入口继续返回「未配置」，不影响既有部署与调用方。
+#[derive(Debug, Clone, Default)]
+pub struct OauthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub authorize_url: String,
+    pub token_url: String,
+    pub redirect_uri: String,
+    pub scope: String,
+}
+impl OauthConfig {
+    /// 仅当客户端标识、密钥与两个端点齐备时才认为 OAuth 已启用。
+    pub fn enabled(&self) -> bool {
+        !self.client_id.is_empty()
+            && !self.client_secret.is_empty()
+            && !self.authorize_url.is_empty()
+            && !self.token_url.is_empty()
+            && !self.redirect_uri.is_empty()
+    }
+}
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -36,6 +61,7 @@ impl Default for GatewayConfig {
             default_model: "codearts-pro".to_string(),
             account_recover_after: Duration::from_secs(60),
             retry_backoff: Duration::from_millis(500),
+            oauth: OauthConfig::default(),
         }
     }
 }
