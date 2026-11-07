@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::account::AccountData;
 use crate::auth::ApiKey;
@@ -7,6 +7,9 @@ use crate::router::RouterConfig;
 
 /// JSON-file account store. Saves atomically via tmp-file + rename,
 /// mirroring the legacy Go store so accounts.json stays compatible.
+///
+/// 所有写路径（accounts / keys / router）共用同一把写锁 `mu`，
+/// 避免并发写入同一个 *.json.tmp 导致 rename 失败或互相覆盖。
 pub struct JsonFileStore {
     path: PathBuf,
     mu: Mutex<()>,
@@ -20,7 +23,17 @@ impl JsonFileStore {
         }
     }
 
-    fn atomic_write(&self, path: &PathBuf, data: &[u8]) -> anyhow::Result<()> {
+    /// 获取写锁。`Mutex<()>` 不保护任何数据，锁中毒时直接恢复即可，
+    /// 不会读到被破坏的状态，也避免因为一次 panic 让后续落盘全部失效。
+    fn lock_writes(&self) -> MutexGuard<'_, ()> {
+        self.mu.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("store lock poisoned, recovering");
+            poisoned.into_inner()
+        })
+    }
+
+    /// 调用方必须已持有 `mu`，本函数自身不加锁（std Mutex 不可重入）。
+    fn atomic_write_locked(&self, path: &PathBuf, data: &[u8]) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             if !dir.as_os_str().is_empty() {
                 std::fs::create_dir_all(dir)?;
@@ -47,7 +60,7 @@ impl JsonFileStore {
             }
         };
         let data = serde_json::to_vec_pretty(accounts)?;
-        self.atomic_write(&self.path.clone(), &data)
+        self.atomic_write_locked(&self.path.clone(), &data)
     }
 
     pub fn load(&self) -> anyhow::Result<Vec<AccountData>> {
@@ -83,7 +96,8 @@ impl JsonFileStore {
 
     pub fn save_keys(&self, keys: &[ApiKey]) -> anyhow::Result<()> {
         let data = serde_json::to_vec_pretty(keys)?;
-        self.atomic_write(&self.keys_path(), &data)
+        let _guard = self.lock_writes();
+        self.atomic_write_locked(&self.keys_path(), &data)
     }
 
     pub fn load_keys(&self) -> anyhow::Result<Vec<ApiKey>> {
@@ -96,7 +110,8 @@ impl JsonFileStore {
 
     pub fn save_router(&self, cfg: &RouterConfig) -> anyhow::Result<()> {
         let data = serde_json::to_vec_pretty(cfg)?;
-        self.atomic_write(&self.router_path(), &data)
+        let _guard = self.lock_writes();
+        self.atomic_write_locked(&self.router_path(), &data)
     }
 
     pub fn load_router(&self) -> anyhow::Result<RouterConfig> {
