@@ -100,6 +100,19 @@ impl JsonFileStore {
         self.atomic_write_locked(&self.keys_path(), &data)
     }
 
+    /// 在持有写锁之后才调用 `snapshot` 取最新快照再落盘，
+    /// 保证最后一个获得锁的写入者持久化的一定是最新的内存状态，
+    /// 不会被先取快照、后拿到锁的旧快照覆盖。
+    pub fn save_keys_with<F>(&self, snapshot: F) -> anyhow::Result<()>
+    where
+        F: FnOnce() -> Vec<ApiKey>,
+    {
+        let _guard = self.lock_writes();
+        let keys = snapshot();
+        let data = serde_json::to_vec_pretty(&keys)?;
+        self.atomic_write_locked(&self.keys_path(), &data)
+    }
+
     pub fn load_keys(&self) -> anyhow::Result<Vec<ApiKey>> {
         match std::fs::read(self.keys_path()) {
             Ok(data) => Ok(serde_json::from_slice(&data)?),
