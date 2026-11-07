@@ -94,7 +94,11 @@ impl Drop for StreamFinalize {
             self.state.gateway.record_usage(&self.key_hash, audit.total_tokens);
             // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
             if !self.state.keys.take_dirty().is_empty() {
-                if let Err(e) = self.state.key_store.save_keys(&self.state.keys.list()) {
+                if let Err(e) = self
+                    .state
+                    .key_store
+                    .save_keys_with(|| self.state.keys.list())
+                {
                     tracing::error!("failed to persist key usage (stream): {}", e);
                 }
             }
@@ -215,7 +219,7 @@ async fn handle_chat(
     // A2: 若本次鉴权触发了旧摘要的惰性升级，立即把新 argon2id 摘要
     // 落盘 keys.json；落盘失败仅记 ERROR，下次请求重试升级。
     if !state.keys.take_dirty().is_empty() {
-        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+        if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
             tracing::error!("failed to persist upgraded key hashes: {}", e);
         }
     }
@@ -345,7 +349,7 @@ async fn handle_chat(
                     state.gateway.record_usage(&ctx.key_hash, u.total_tokens);
                     // 用量已变更：收尾时统一落盘一次，保证 keys.json 与内存计数一致。
                     if !state.keys.take_dirty().is_empty() {
-                        if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+                        if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
                             tracing::error!("failed to persist key usage: {}", e);
                         }
                     }
@@ -408,7 +412,7 @@ async fn handle_models(
     let probe_key_name = state.gateway.models_probe(&api_key);
     if probe_key_name.is_some() {
         if !state.keys.take_dirty().is_empty() {
-            if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+            if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
                 tracing::error!("failed to persist upgraded key hashes: {}", e);
             }
         }
@@ -463,7 +467,7 @@ async fn handle_embeddings(
     let probe_key_name = state.gateway.models_probe(&api_key);
     if probe_key_name.is_some() {
         if !state.keys.take_dirty().is_empty() {
-            if let Err(e) = state.key_store.save_keys(&state.keys.list()) {
+            if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
                 tracing::error!("failed to persist upgraded key hashes: {}", e);
             }
         }
