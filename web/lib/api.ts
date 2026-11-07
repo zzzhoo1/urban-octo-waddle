@@ -34,6 +34,16 @@ export interface RequestLog {
   cached_tokens?: number;
   source_ip?: string;
   key_name?: string;
+  /** B4: 解析层级（user_rule / downgrade / builtin_tier / passthrough） */
+  route_via?: string;
+  /** B4: 实际调用的上游模型名 */
+  resolved_model?: string;
+  /** B4: 尝试次数（含首次） */
+  attempts?: number;
+  /** B4: 重试账号链（按尝试顺序） */
+  retry_account_ids?: string[];
+  /** B4: log_only 降级观察标记 */
+  downgrade_observed?: boolean;
 }
 
 export interface GatewayInfo {
@@ -50,6 +60,14 @@ export interface GatewayInfo {
   default_model: string;
   sticky_sessions: number;
   api_keys: number;
+  admin_keys: number;
+  user_keys: number;
+  /** A3: 上游连接建立超时（秒） */
+  upstream_connect_timeout_secs: number;
+  /** A3: 流式首字节超时（秒），首帧后不受限 */
+  stream_first_byte_timeout_secs: number;
+  /** A3: 非流式整体超时（秒） */
+  non_stream_timeout_secs: number;
   upstream: string;
 }
 
@@ -69,6 +87,18 @@ export interface ApiKeyInfo {
   model_allowlist: string[];
   enabled: boolean;
   expired: boolean;
+  /** A2: admin 或 user；旧数据缺省读作 admin */
+  role: "admin" | "user";
+  /** A2: 主密钥不可删改 */
+  is_master: boolean;
+  /** A2: 仍为旧 SHA-256 摘要时提示轮换 */
+  legacy_hash: boolean;
+  /** B3: 配额周期（none/daily/monthly） */
+  quota_period: string;
+  /** B3: 当前周期起始时刻（UTC） */
+  quota_period_start?: string | null;
+  /** B3: 周期内已用 token */
+  tokens_used_in_period: number;
 }
 
 export interface StatsResponse {
@@ -105,6 +135,12 @@ export interface RouterConfig {
     sources: string[];
     target: string;
     enabled: boolean;
+    /** B2: 启发式后台判定（tools+tool 历史、bg- 前缀，双信号阈值） */
+    use_heuristic?: boolean;
+    /** B2: 降级时同时把 reasoning_effort 压到 low */
+    also_downgrade_effort?: boolean;
+    /** B2: 只记录不改写（灰度观察模式） */
+    log_only?: boolean;
   } | null;
 }
 
@@ -175,6 +211,8 @@ export const api = {
     expires_at?: string | null;
     token_quota?: number;
     model_allowlist?: string[];
+    /** A2: 缺省 user，需显式传 admin 才创建管理密钥 */
+    role?: "admin" | "user";
   }) =>
     request<ApiKeyInfo>("/keys", {
       method: "POST",
@@ -182,7 +220,16 @@ export const api = {
     }),
   patchKey: (
     name: string,
-    payload: { enabled?: boolean; token_quota?: number; expires_at?: string | null }
+    payload: {
+      enabled?: boolean;
+      token_quota?: number;
+      expires_at?: string | null;
+      role?: "admin" | "user";
+      /** B3: 模型白名单，空数组 = 全部模型 */
+      model_allowlist?: string[];
+      /** B3: 配额周期 */
+      quota_period?: "none" | "daily" | "monthly";
+    }
   ) =>
     request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}`, {
       method: "PATCH",
@@ -190,6 +237,11 @@ export const api = {
     }),
   deleteKey: (name: string) =>
     request<void>(`/keys/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** B3: 重置当前周期用量（累计值不变） */
+  resetKeyUsage: (name: string) =>
+    request<ApiKeyInfo>(`/keys/${encodeURIComponent(name)}/reset-usage`, {
+      method: "POST",
+    }),
   getRouter: () => request<RouterConfig>("/router"),
   putRouter: (cfg: RouterConfig) =>
     request<RouterConfig>("/router", {

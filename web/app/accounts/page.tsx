@@ -45,6 +45,56 @@ function statusBadge(status: string) {
   }
 }
 
+/** 移动端纵向卡片：一个账号一张卡 */
+function AccountCard({
+  acc,
+  onToggle,
+  onDelete,
+}: {
+  acc: Account;
+  onToggle: (acc: Account, enabled: boolean) => void;
+  onDelete: (acc: Account) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 space-y-1.5">
+      <div className="flex items-center justify-between pb-1 border-b border-[var(--border)]">
+        <span className="font-medium text-sm">{acc.name}</span>
+        {statusBadge(acc.status)}
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">失败计数</span>
+        {acc.failure_count > 0 ? (
+          <span className="text-amber-500 font-medium text-xs">{acc.failure_count}</span>
+        ) : (
+          <span className="text-xs text-[var(--muted-foreground)]">0</span>
+        )}
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">最近失败</span>
+        <span className="text-xs">{formatTime(acc.last_failure_at)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-xs text-[var(--muted-foreground)]">创建时间</span>
+        <span className="text-xs">{formatTime(acc.created_at)}</span>
+      </div>
+      <div className="flex items-center justify-between pt-1">
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={acc.status !== "disabled"}
+            onCheckedChange={(c) => onToggle(acc, c)}
+          />
+          <span className="text-xs text-[var(--muted-foreground)]">
+            {acc.status !== "disabled" ? "已启用" : "已禁用"}
+          </span>
+        </div>
+        <Button variant="ghost" size="icon" onClick={() => onDelete(acc)}>
+          <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -132,14 +182,14 @@ export default function AccountsPage() {
 
   return (
     <Shell>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold">账号管理</h1>
           <p className="text-sm text-[var(--muted-foreground)]">
             共 {accounts.length} 个账号，凭据加密存储，页面不展示明文
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Button variant="outline" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4" />
             刷新
@@ -155,71 +205,90 @@ export default function AccountsPage() {
       </div>
 
       <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
-        <Card>
-          <CardContent className="pt-6">
-            {loading ? (
-              <div className="space-y-3">
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-                <Skeleton className="h-10 w-full" />
-              </div>
-            ) : accounts.length === 0 ? (
-              <div className="py-16 text-center text-sm text-[var(--muted-foreground)]">
-                暂无账号，点击右上角『手动录入』添加第一个账号
-              </div>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>名称</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead>失败计数</TableHead>
-                    <TableHead>最近失败</TableHead>
-                    <TableHead>创建时间</TableHead>
-                    <TableHead>启用</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {accounts.map((acc) => (
-                    <TableRow key={acc.id}>
-                      <TableCell className="font-medium">{acc.name}</TableCell>
-                      <TableCell>{statusBadge(acc.status)}</TableCell>
-                      <TableCell>
-                        {acc.failure_count > 0 ? (
-                          <span className="text-amber-500 font-medium">{acc.failure_count}</span>
-                        ) : (
-                          <span className="text-[var(--muted-foreground)]">0</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-[var(--muted-foreground)]">
-                        {formatTime(acc.last_failure_at)}
-                      </TableCell>
-                      <TableCell className="text-[var(--muted-foreground)]">
-                        {formatTime(acc.created_at)}
-                      </TableCell>
-                      <TableCell>
-                        <Switch
-                          checked={acc.status !== "disabled"}
-                          onCheckedChange={(checked) => toggle(acc, checked)}
-                        />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => setDeleteTarget(acc)}
-                        >
-                          <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
-                        </Button>
-                      </TableCell>
+        {loading ? (
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </CardContent>
+          </Card>
+        ) : accounts.length === 0 ? (
+          <Card>
+            <CardContent className="py-16 text-center text-sm text-[var(--muted-foreground)]">
+              暂无账号，点击右上角『手动录入』添加第一个账号
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            {/* 桌面端：表格视图 */}
+            <Card className="hidden md:block">
+              <CardContent className="pt-6">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>名称</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>失败计数</TableHead>
+                      <TableHead>最近失败</TableHead>
+                      <TableHead>创建时间</TableHead>
+                      <TableHead>启用</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+                  </TableHeader>
+                  <TableBody>
+                    {accounts.map((acc) => (
+                      <TableRow key={acc.id}>
+                        <TableCell className="font-medium">{acc.name}</TableCell>
+                        <TableCell>{statusBadge(acc.status)}</TableCell>
+                        <TableCell>
+                          {acc.failure_count > 0 ? (
+                            <span className="text-amber-500 font-medium">{acc.failure_count}</span>
+                          ) : (
+                            <span className="text-[var(--muted-foreground)]">0</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-[var(--muted-foreground)]">
+                          {formatTime(acc.last_failure_at)}
+                        </TableCell>
+                        <TableCell className="text-[var(--muted-foreground)]">
+                          {formatTime(acc.created_at)}
+                        </TableCell>
+                        <TableCell>
+                          <Switch
+                            checked={acc.status !== "disabled"}
+                            onCheckedChange={(checked) => toggle(acc, checked)}
+                          />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setDeleteTarget(acc)}
+                          >
+                            <Trash2 className="h-4 w-4 text-[var(--destructive)]" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+
+            {/* 移动端：纵向卡片视图 */}
+            <div className="md:hidden space-y-3">
+              {accounts.map((acc) => (
+                <AccountCard
+                  key={acc.id}
+                  acc={acc}
+                  onToggle={toggle}
+                  onDelete={setDeleteTarget}
+                />
+              ))}
+            </div>
+          </>
+        )}
       </motion.div>
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>

@@ -26,7 +26,13 @@ impl SessionManager {
 
     /// Look up the account bound to a session; expired entries are removed.
     pub fn get(&self, session_id: &str) -> Option<String> {
-        let mut guard = self.entries.write().expect("session lock poisoned");
+        let mut guard = match self.entries.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("session lock poisoned (write)");
+                return None;
+            }
+        };
         match guard.get(session_id) {
             Some(entry) if Instant::now() < entry.expires_at => Some(entry.account_id.clone()),
             Some(_) => {
@@ -39,7 +45,13 @@ impl SessionManager {
 
     /// Bind a session to an account, evicting the oldest entry when full.
     pub fn bind(&self, session_id: &str, account_id: &str) {
-        let mut guard = self.entries.write().expect("session lock poisoned");
+        let mut guard = match self.entries.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("session lock poisoned (write), bind dropped");
+                return;
+            }
+        };
         guard.insert(
             session_id.to_string(),
             Entry {
@@ -59,20 +71,30 @@ impl SessionManager {
     }
 
     pub fn unbind(&self, session_id: &str) {
-        self.entries
-            .write()
-            .expect("session lock poisoned")
-            .remove(session_id);
+        if let Ok(mut g) = self.entries.write() {
+            g.remove(session_id);
+        } else {
+            tracing::error!("session lock poisoned (write)");
+        }
     }
 
     pub fn size(&self) -> usize {
-        self.entries.read().expect("session lock poisoned").len()
+        match self.entries.read() {
+            Ok(g) => g.len(),
+            Err(_) => 0,
+        }
     }
 
     /// Remove all expired entries, returning how many were purged.
     pub fn purge_expired(&self) -> usize {
         let now = Instant::now();
-        let mut guard = self.entries.write().expect("session lock poisoned");
+        let mut guard = match self.entries.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("session lock poisoned (write)");
+                return 0;
+            }
+        };
         let before = guard.len();
         guard.retain(|_, entry| now < entry.expires_at);
         before - guard.len()

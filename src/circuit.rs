@@ -47,7 +47,14 @@ impl Breaker {
     /// Whether a request may proceed. Transitions open -> half_open once the
     /// cooldown elapsed, allowing exactly one probe request.
     pub fn allow(&self) -> bool {
-        let mut guard = self.inner.write().expect("breaker lock poisoned");
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                // A1: 熔断器锁中毒时按放行处理，避免把请求全部挡死
+                tracing::error!("circuit breaker lock poisoned (write), allowing");
+                return true;
+            }
+        };
         match guard.state {
             State::Closed => true,
             State::HalfOpen => !guard.probe_pending,
@@ -68,7 +75,13 @@ impl Breaker {
     }
 
     pub fn record_success(&self) {
-        let mut guard = self.inner.write().expect("breaker lock poisoned");
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("circuit breaker lock poisoned (write)");
+                return;
+            }
+        };
         guard.state = State::Closed;
         guard.consecutive_failures = 0;
         guard.probe_pending = false;
@@ -76,7 +89,13 @@ impl Breaker {
     }
 
     pub fn record_failure(&self) {
-        let mut guard = self.inner.write().expect("breaker lock poisoned");
+        let mut guard = match self.inner.write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::error!("circuit breaker lock poisoned (write)");
+                return;
+            }
+        };
         guard.consecutive_failures = guard.consecutive_failures.saturating_add(1);
         match guard.state {
             State::HalfOpen => {

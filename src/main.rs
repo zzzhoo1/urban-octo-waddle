@@ -8,6 +8,7 @@ mod error;
 mod gateway;
 mod logs;
 mod openai;
+mod persist;
 mod router;
 mod routes;
 mod session;
@@ -15,11 +16,15 @@ mod sse_tap;
 mod statics;
 mod store;
 mod upstream;
+mod usage;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{response::Redirect, routing::get, Router};
 use clap::Parser;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::CompressionLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::account::Pool;
@@ -31,6 +36,7 @@ use crate::logs::RequestLog;
 use crate::router::ModelRouter;
 use crate::store::JsonFileStore;
 use crate::upstream::{CodeArtsClient, CODEARTS_GATEWAY_PROD};
+use crate::usage::UsageStore;
 
 /// CodeArts OpenAI-compatible multi-account gateway (Rust rewrite).
 #[derive(Parser, Debug)]
@@ -80,6 +86,45 @@ pub struct Cli {
     /// keys.json is empty.
     #[arg(long = "gw-key", default_value = "")]
     pub gw_key: String,
+
+    /// B4: SQLite audit log path (empty = same dir as the account store).
+    #[arg(long = "logs-db", default_value = "")]
+    pub logs_db: String,
+
+    /// B4: audit log retention in days.
+    #[arg(long = "logs-retention-days", default_value_t = 30)]
+    pub logs_retention_days: u64,
+
+    /// B4: audit log max row count.
+    #[arg(long = "logs-max-rows", default_value_t = 500_000)]
+    pub logs_max_rows: u64,
+
+    /// SQLite usage store path (empty = usage.db next to the account store).
+    #[arg(long = "usage-db", default_value = "")]
+    pub usage_db: String,
+
+    /// B4: trust X-Forwarded-For / X-Real-IP (default true; disable when
+    /// the gateway is directly exposed to the public internet).
+    #[arg(long = "trust-proxy-headers", default_value_t = true)]
+    pub trust_proxy_headers: bool,
+    /// 授权登录客户端标识（与下方配置齐备时才启用授权入口）。
+    #[arg(long = "oauth-client-id", default_value = "")]
+    pub oauth_client_id: String,
+    /// 授权登录客户端密钥。
+    #[arg(long = "oauth-client-secret", default_value = "")]
+    pub oauth_client_secret: String,
+    /// 授权登录授权端点。
+    #[arg(long = "oauth-authorize-url", default_value = "")]
+    pub oauth_authorize_url: String,
+    /// 授权登录令牌端点。
+    #[arg(long = "oauth-token-url", default_value = "")]
+    pub oauth_token_url: String,
+    /// 授权登录回调地址。
+    #[arg(long = "oauth-redirect-uri", default_value = "")]
+    pub oauth_redirect_uri: String,
+    /// 授权登录申请的授权范围（可选）。
+    #[arg(long = "oauth-scope", default_value = "")]
+    pub oauth_scope: String,
 }
 
 /// Shared application state.
@@ -91,9 +136,14 @@ pub struct AppState {
     pub key_store: Arc<JsonFileStore>,
     pub encryptor: Arc<Encryptor>,
     pub logs: Arc<RequestLog>,
+    pub usage: Arc<UsageStore>,
     pub cfg: GatewayConfig,
     pub listen: String,
     pub router: Arc<ModelRouter>,
+    /// Server secret, used to derive key lookup fingerprints (A2).
+    pub secret: String,
+    /// B4: whether to trust X-Forwarded-For / X-Real-IP headers.
+    pub trust_proxy_headers: bool,
 }
 
 #[tokio::main]
@@ -114,14 +164,23 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--gw-key is required");
     }
 
-    let cfg = GatewayConfig::default();
+    let mut cfg = GatewayConfig::default();
+    // 授权登录配置：参数齐备时启用，缺省维持未配置行为。
+    cfg.oauth = crate::config::OauthConfig {
+        client_id: cli.oauth_client_id.clone(),
+        client_secret: cli.oauth_client_secret.clone(),
+        authorize_url: cli.oauth_authorize_url.clone(),
+        token_url: cli.oauth_token_url.clone(),
+        redirect_uri: cli.oauth_redirect_uri.clone(),
+        scope: cli.oauth_scope.clone(),
+    };
     let encryptor = Arc::new(Encryptor::new(&cli.secret));
     let store_path = if cli.store.is_empty() {
         "accounts.json".to_string()
     } else {
         cli.store.clone()
     };
-    let store = Arc::new(JsonFileStore::new(store_path));
+    let store = Arc::new(JsonFileStore::new(store_path.clone()));
 
     let pool = Arc::new(Pool::new());
     for acc in store.load()? {
@@ -132,21 +191,30 @@ async fn main() -> anyhow::Result<()> {
     // existing single-key deployments keep working without migration.
     let persisted = store.load_keys().unwrap_or_default();
     let keys = if persisted.is_empty() {
-        Arc::new(KeyAuth::new(vec![cli.gw_key.clone()]))
+        Arc::new(KeyAuth::new(&cli.secret, vec![cli.gw_key.clone()]))
     } else {
-        let ka = KeyAuth::from_entries(persisted);
+        let ka = KeyAuth::from_entries(&cli.secret, persisted);
+        // A2: 主密钥若已存在于旧 keys.json，标记为不可删改的 admin 条目。
+        ka.mark_master(&cli.gw_key);
         // Ensure the master key still works even if not in the file.
         if !ka.authenticate(&cli.gw_key) {
             ka.upsert(crate::auth::ApiKey {
                 name: "master".to_string(),
-                key_hash: crate::auth::hash_key(&cli.gw_key),
+                key_hash: crate::auth::hash_key_slow(&cli.gw_key),
+                fingerprint: crate::auth::fingerprint_key(&cli.secret, &cli.gw_key),
                 hint: crate::auth::mask_key(&cli.gw_key),
                 created_at: Some(chrono::Utc::now()),
                 expires_at: None,
                 token_quota: 0,
                 tokens_used: 0,
+                quota_period: crate::auth::QuotaPeriod::None,
+                quota_period_start: None,
+                tokens_used_in_period: 0,
                 model_allowlist: Vec::new(),
                 enabled: true,
+                role: crate::auth::KeyRole::Admin,
+                is_master: true,
+                legacy_hash: false,
             });
         }
         Arc::new(ka)
@@ -170,6 +238,47 @@ async fn main() -> anyhow::Result<()> {
         router.clone(),
     ));
 
+    // B4: audit log persistence — defaults to logs.db next to the account store.
+    let logs_db_path = if cli.logs_db.is_empty() {
+        let dir = std::path::Path::new(&store_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        dir.join("logs.db").to_string_lossy().to_string()
+    } else {
+        cli.logs_db.clone()
+    };
+    let logs = Arc::new(
+        RequestLog::new(500).with_db(&logs_db_path, cli.logs_retention_days, cli.logs_max_rows),
+    );
+
+    // 建议 4: SQLite 用量存储;首次启动时把 keys.json 中的存量用量迁移进去。
+    let usage_db_path = if cli.usage_db.is_empty() {
+        let dir = std::path::Path::new(&store_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        dir.join("usage.db").to_string_lossy().to_string()
+    } else {
+        cli.usage_db.clone()
+    };
+    let usage = Arc::new(UsageStore::open(&usage_db_path)?);
+    let known: std::collections::HashSet<String> = usage
+        .load_all()?
+        .into_iter()
+        .map(|r| r.fingerprint)
+        .collect();
+    for key in keys.list() {
+        if !known.contains(&key.fingerprint) {
+            usage.upsert(
+                &key.fingerprint,
+                key.tokens_used,
+                key.tokens_used_in_period,
+                key.quota_period_start,
+            )?;
+        }
+    }
+
     let state = Arc::new(AppState {
         gateway,
         keys,
@@ -177,11 +286,17 @@ async fn main() -> anyhow::Result<()> {
         store: store.clone(),
         key_store: store,
         encryptor,
-        logs: Arc::new(RequestLog::new(500)),
+        logs,
+        usage,
         cfg,
         listen: cli.listen.clone(),
         router,
+        secret: cli.secret.clone(),
+        trust_proxy_headers: cli.trust_proxy_headers,
     });
+
+    // 建议 2:后台批量落盘 keys.json(每 5 秒一次),退出前再 flush 一次。
+    let persist = persist::PersistHandle::start(state.clone(), Duration::from_secs(5));
 
     let app = Router::new()
         .merge(routes::v1_router(state.clone()))
@@ -190,16 +305,49 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin", get(|| async { Redirect::temporary("/admin/") }))
         .route("/admin/", get(statics::admin_index))
         .route("/admin/{*path}", get(statics::admin_static))
+        // A1: 最外层 panic 捕获——单请求 panic 返回统一错误信封，进程存活。
+        .layer(CatchPanicLayer::custom(error::panic_response))
+        // A3: 响应压缩仅作用非 SSE 内容（SSE 的 Content-Type 不在压缩列表内）。
+        .layer(CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let bind = normalize_listen(&cli.listen);
     tracing::info!("listening on {}", bind);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(
+
+    let shutdown = async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            match signal(SignalKind::terminate()) {
+                Ok(mut s) => {
+                    s.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    };
+
+    let result = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(shutdown)
+    .await;
+
+    // 优雅退出:停止后台循环(等待在途写入完成),再做最后一次落盘。
+    persist.shutdown(state.clone()).await;
+    result?;
     Ok(())
 }
 

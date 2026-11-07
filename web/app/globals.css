@@ -79,10 +79,63 @@
   * {
     border-color: var(--color-border);
   }
+  html,
+  body {
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   }
+  /* 图表与媒体内容不超出容器 */
+  .recharts-responsive-container {
+    max-width: 100%;
+  }
+  img,
+  svg,
+  video,
+  canvas {
+    max-width: 100%;
+    height: auto;
+  }
+  /* 窄屏下输入框不溢出 */
+  input,
+  select,
+  textarea {
+    max-width: 100%;
+  }
+}
+
+/* 骨架屏流光扫过动画 */
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* 状态徽章颜色过渡 */
+[data-slot='badge'],
+.badge-transition {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* 表格行入场：数据加载后逐行轻微淡入 */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 开关与按钮的按压反馈 */
+button:active {
+  transform: scale(0.98);
+  transition: transform 0.1s ease;
 }
