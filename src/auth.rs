@@ -438,6 +438,26 @@ impl KeyAuth {
         }
     }
 
+    /// Put fingerprints back after a failed persist so the next request
+    /// retries the write. Entries already pending are not duplicated.
+    pub fn restore_dirty(&self, fps: Vec<String>) {
+        if fps.is_empty() {
+            return;
+        }
+        match self.dirty.write() {
+            Ok(mut d) => {
+                for fp in fps {
+                    if !d.contains(&fp) {
+                        d.push(fp);
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::error!("auth dirty lock poisoned (write), restore skipped");
+            }
+        }
+    }
+
     /// Authenticate a data-plane caller for a specific model. The role does
     /// not participate in data-plane decisions (A2 规格第 3 条)。
     /// B1: allowlist matches the client-supplied name OR the resolved
