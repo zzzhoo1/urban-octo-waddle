@@ -9,17 +9,37 @@ use crate::AppState;
 /// failure the fingerprints are restored so a later cycle retries instead of
 /// silently dropping the changes.
 pub fn flush_once(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let mut result = Ok(());
+
+    // keys.json: structural changes only (lazy hash upgrade, admin edits).
     let dirty = state.keys.take_dirty();
-    if dirty.is_empty() {
-        return Ok(());
-    }
-    match state.key_store.save_keys_with(|| state.keys.list()) {
-        Ok(()) => Ok(()),
-        Err(e) => {
+    if !dirty.is_empty() {
+        if let Err(e) = state.key_store.save_keys_with(|| state.keys.list()) {
             state.keys.restore_dirty(dirty);
-            Err(e)
+            result = Err(e);
         }
     }
+
+    // usage.db: batched absolute counters for changed keys.
+    let usage_dirty = state.keys.take_usage_dirty();
+    if !usage_dirty.is_empty() {
+        let mut failed: Option<anyhow::Error> = None;
+        for fp in &usage_dirty {
+            let Some((used, used_in_period, start)) = state.keys.usage_snapshot(fp) else {
+                continue;
+            };
+            if let Err(e) = state.usage.upsert(fp, used, used_in_period, start) {
+                failed = Some(e);
+                break;
+            }
+        }
+        if let Some(e) = failed {
+            state.keys.restore_usage_dirty(usage_dirty);
+            result = Err(e);
+        }
+    }
+
+    result
 }
 
 /// Handle for the background persist loop; supports graceful shutdown.
