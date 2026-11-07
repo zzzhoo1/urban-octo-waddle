@@ -16,6 +16,7 @@ mod sse_tap;
 mod statics;
 mod store;
 mod upstream;
+mod usage;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +36,7 @@ use crate::logs::RequestLog;
 use crate::router::ModelRouter;
 use crate::store::JsonFileStore;
 use crate::upstream::{CodeArtsClient, CODEARTS_GATEWAY_PROD};
+use crate::usage::UsageStore;
 
 /// CodeArts OpenAI-compatible multi-account gateway (Rust rewrite).
 #[derive(Parser, Debug)]
@@ -97,6 +99,10 @@ pub struct Cli {
     #[arg(long = "logs-max-rows", default_value_t = 500_000)]
     pub logs_max_rows: u64,
 
+    /// SQLite usage store path (empty = usage.db next to the account store).
+    #[arg(long = "usage-db", default_value = "")]
+    pub usage_db: String,
+
     /// B4: trust X-Forwarded-For / X-Real-IP (default true; disable when
     /// the gateway is directly exposed to the public internet).
     #[arg(long = "trust-proxy-headers", default_value_t = true)]
@@ -130,6 +136,7 @@ pub struct AppState {
     pub key_store: Arc<JsonFileStore>,
     pub encryptor: Arc<Encryptor>,
     pub logs: Arc<RequestLog>,
+    pub usage: Arc<UsageStore>,
     pub cfg: GatewayConfig,
     pub listen: String,
     pub router: Arc<ModelRouter>,
@@ -245,6 +252,33 @@ async fn main() -> anyhow::Result<()> {
         RequestLog::new(500).with_db(&logs_db_path, cli.logs_retention_days, cli.logs_max_rows),
     );
 
+    // 建议 4: SQLite 用量存储;首次启动时把 keys.json 中的存量用量迁移进去。
+    let usage_db_path = if cli.usage_db.is_empty() {
+        let dir = std::path::Path::new(&store_path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        dir.join("usage.db").to_string_lossy().to_string()
+    } else {
+        cli.usage_db.clone()
+    };
+    let usage = Arc::new(UsageStore::open(&usage_db_path)?);
+    let known: std::collections::HashSet<String> = usage
+        .load_all()?
+        .into_iter()
+        .map(|r| r.fingerprint)
+        .collect();
+    for key in keys.list() {
+        if !known.contains(&key.fingerprint) {
+            usage.upsert(
+                &key.fingerprint,
+                key.tokens_used,
+                key.tokens_used_in_period,
+                key.quota_period_start,
+            )?;
+        }
+    }
+
     let state = Arc::new(AppState {
         gateway,
         keys,
@@ -253,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
         key_store: store,
         encryptor,
         logs,
+        usage,
         cfg,
         listen: cli.listen.clone(),
         router,

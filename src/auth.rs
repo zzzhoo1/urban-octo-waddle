@@ -310,6 +310,9 @@ pub struct KeyAuth {
     secret: String,
     /// Lazily-upgraded entries waiting to be persisted (by fingerprint).
     dirty: RwLock<Vec<String>>,
+    /// Fingerprints whose usage counters changed since the last flush
+    /// (needs a SQLite usage upsert).
+    usage_dirty: RwLock<Vec<String>>,
 }
 
 impl KeyAuth {
@@ -341,6 +344,7 @@ impl KeyAuth {
             keys: RwLock::new(map),
             secret: secret.to_string(),
             dirty: RwLock::new(Vec::new()),
+            usage_dirty: RwLock::new(Vec::new()),
         }
     }
 
@@ -362,6 +366,7 @@ impl KeyAuth {
             keys: RwLock::new(map),
             secret: secret.to_string(),
             dirty: RwLock::new(Vec::new()),
+            usage_dirty: RwLock::new(Vec::new()),
         }
     }
 
@@ -458,6 +463,53 @@ impl KeyAuth {
         }
     }
 
+    /// Drain the list of fingerprints whose usage counters changed since the
+    /// last call, so the caller can persist them to the usage store.
+    pub fn take_usage_dirty(&self) -> Vec<String> {
+        match self.usage_dirty.write() {
+            Ok(mut d) => std::mem::take(&mut *d),
+            Err(_) => {
+                tracing::error!("usage dirty lock poisoned (read)");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Put fingerprints back after a failed usage persist so the next cycle
+    /// retries. Entries already pending are not duplicated.
+    pub fn restore_usage_dirty(&self, fps: Vec<String>) {
+        if fps.is_empty() {
+            return;
+        }
+        match self.usage_dirty.write() {
+            Ok(mut d) => {
+                for fp in fps {
+                    if !d.contains(&fp) {
+                        d.push(fp);
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::error!("usage dirty lock poisoned (write), restore skipped");
+            }
+        }
+    }
+
+    /// Current in-memory usage counters for one key, used by the background
+    /// flush to write absolute values into the usage store.
+    pub fn usage_snapshot(
+        &self,
+        fingerprint: &str,
+    ) -> Option<(u64, u64, Option<DateTime<Utc>>)> {
+        let guard = self.keys.read().ok()?;
+        let k = guard.get(fingerprint)?;
+        Some((
+            k.tokens_used,
+            k.tokens_used_in_period,
+            k.quota_period_start,
+        ))
+    }
+
     /// Authenticate a data-plane caller for a specific model. The role does
     /// not participate in data-plane decisions (A2 规格第 3 条)。
     /// B1: allowlist matches the client-supplied name OR the resolved
@@ -516,7 +568,7 @@ impl KeyAuth {
     }
 
     /// B3: lazily roll quota periods at authentication time. Rolled entries
-    /// are marked dirty so the existing keys.json persist path flushes them.
+    /// are marked usage-dirty so the usage store flush path persists them.
     pub fn roll_quota_periods(&self) {
         let now = Utc::now();
         let mut rolled = Vec::new();
@@ -534,10 +586,10 @@ impl KeyAuth {
         }
         drop(guard);
         if !rolled.is_empty() {
-            match self.dirty.write() {
+            match self.usage_dirty.write() {
                 Ok(mut d) => d.extend(rolled.iter().cloned()),
                 Err(_) => {
-                    tracing::error!("auth dirty lock poisoned (write), quota roll persist skipped");
+                    tracing::error!("usage dirty lock poisoned (write), quota roll persist skipped");
                 }
             }
             tracing::info!(count = rolled.len(), "quota periods rolled");
@@ -614,11 +666,11 @@ impl KeyAuth {
                 tracing::error!("auth keys lock poisoned (write), usage dropped");
             }
         }
-        // 用量变更后标记为待落盘，由调用方在请求收尾统一写盘一次，
-        // 避免每个请求各自写文件造成 IO 放大；同时保证进程异常退出时
-        // 内存计数与 keys.json 不会长期偏离。
+        // 用量变更后标记为待落盘（usage.db），由后台批量写入，避免每个
+        // 请求各自写文件造成 IO 放大；同时保证进程异常退出时内存计数与
+        // usage.db 不会长期偏离。
         if changed {
-            if let Ok(mut d) = self.dirty.write() {
+            if let Ok(mut d) = self.usage_dirty.write() {
                 let fp = fingerprint.to_string();
                 if !d.contains(&fp) {
                     d.push(fp);
